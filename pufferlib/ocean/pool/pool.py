@@ -16,7 +16,10 @@ class Pool(pufferlib.PufferEnv):
         friction=0.992,
         restitution=0.96,
         impulse=0.12,
-        reward_step=-0.001,
+        min_power=0.35,
+        reward_step=0.0,
+        reward_shot=-0.01,
+        reward_progress=0.5,
         reward_pot_object=1.0,
         reward_scratch=-0.5,
         fast_forward=True,
@@ -38,8 +41,11 @@ class Pool(pufferlib.PufferEnv):
             shape=(11,),
             dtype=np.float32,
         )
-        # Action 0: no-op, 1..16: shot direction around 360 degrees
-        self.single_action_space = gymnasium.spaces.Discrete(17)
+        # Action[0]: 0 no-op, 1..16 shot direction around 360 degrees
+        # Action[1]: power bin in [0..4]
+        self.single_action_space = gymnasium.spaces.MultiDiscrete(
+            [17, 5], dtype=np.int32
+        )
 
         super().__init__(buf)
 
@@ -58,7 +64,10 @@ class Pool(pufferlib.PufferEnv):
             friction=friction,
             restitution=restitution,
             impulse=impulse,
+            min_power=min_power,
             reward_step=reward_step,
+            reward_shot=reward_shot,
+            reward_progress=reward_progress,
             reward_pot_object=reward_pot_object,
             reward_scratch=reward_scratch,
             fast_forward=fast_forward,
@@ -101,7 +110,9 @@ def test_performance(timeout=10, atn_cache=1024):
     env.reset()
 
     tick = 0
-    actions = np.random.randint(0, 17, (atn_cache, num_envs), dtype=np.int32)
+    actions = np.empty((atn_cache, num_envs, 2), dtype=np.int32)
+    actions[..., 0] = np.random.randint(0, 17, (atn_cache, num_envs), dtype=np.int32)
+    actions[..., 1] = np.random.randint(0, 5, (atn_cache, num_envs), dtype=np.int32)
 
     import time
 

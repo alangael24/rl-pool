@@ -6,6 +6,7 @@
 
 #define PI 3.14159265358979323846f
 #define NUM_SHOT_DIRS 16
+#define NUM_POWER_BINS 5
 #define STATIONARY_EPS 0.0005f
 
 typedef struct Log Log;
@@ -44,8 +45,11 @@ struct Pool {
     float friction;
     float restitution;
     float impulse;
+    float min_power;
 
     float reward_step;
+    float reward_shot;
+    float reward_progress;
     float reward_pot_object;
     float reward_scratch;
     unsigned char fast_forward;
@@ -245,17 +249,25 @@ static inline void collide_balls(Pool* env) {
     env->obj_y += correction * ny;
 }
 
-static inline void maybe_take_shot(Pool* env) {
-    int action = env->actions[0];
-    if (action <= 0 || !balls_stationary(env)) {
-        return;
+static inline bool maybe_take_shot(Pool* env) {
+    int direction_action = env->actions[0];
+    int power_action = env->actions[1];
+    if (direction_action <= 0 || !balls_stationary(env)) {
+        return false;
     }
 
-    int dir_idx = (action - 1) % NUM_SHOT_DIRS;
+    int dir_idx = (direction_action - 1) % NUM_SHOT_DIRS;
+    int pwr_idx = power_action % NUM_POWER_BINS;
+    float power_frac = (float)pwr_idx / (float)(NUM_POWER_BINS - 1);
+    float power_scale = env->min_power + (1.0f - env->min_power) * power_frac;
+    float shot_impulse = env->impulse * power_scale;
+
     float angle = (2.0f * PI * (float)dir_idx) / (float)NUM_SHOT_DIRS;
-    env->cue_vx += cosf(angle) * env->impulse;
-    env->cue_vy += sinf(angle) * env->impulse;
+    env->cue_vx += cosf(angle) * shot_impulse;
+    env->cue_vy += sinf(angle) * shot_impulse;
     env->shots_taken += 1;
+    env->rewards[0] += env->reward_shot;
+    return true;
 }
 
 static inline void simulate_physics_step(Pool* env) {
@@ -287,7 +299,9 @@ void c_step(Pool* env) {
     env->terminals[0] = 0;
 
     env->tick += 1;
-    maybe_take_shot(env);
+    float table_diag = sqrtf(env->table_width * env->table_width + env->table_height * env->table_height);
+    float start_dist = sqrtf(dist_sq(env->obj_x, env->obj_y, env->pocket_x, env->pocket_y));
+    bool shot_fired = maybe_take_shot(env);
 
     bool done = false;
     bool success = false;
@@ -319,6 +333,12 @@ void c_step(Pool* env) {
         if (env->fast_forward && balls_stationary(env)) {
             break;
         }
+    }
+
+    if (shot_fired) {
+        float end_dist = sqrtf(dist_sq(env->obj_x, env->obj_y, env->pocket_x, env->pocket_y));
+        float progress = (start_dist - end_dist) / fmaxf(table_diag, 1e-6f);
+        env->rewards[0] += env->reward_progress * progress;
     }
 
     if (env->tick >= env->max_steps) {
@@ -389,7 +409,7 @@ void c_render(Pool* env) {
 
     DrawText(TextFormat("Step: %d / %d", env->tick, env->max_steps), 12, 10, 20, RAYWHITE);
     DrawText(TextFormat("Shots: %d", env->shots_taken), 12, 34, 20, RAYWHITE);
-    DrawText("Shift + arrows in pool.c demo for manual shots", 12, 58, 18, LIGHTGRAY);
+    DrawText("Shift+arrows to aim, 1..5 for power", 12, 58, 18, LIGHTGRAY);
 
     EndDrawing();
 }

@@ -10,7 +10,10 @@ int main() {
         .friction = 0.992f,
         .restitution = 0.96f,
         .impulse = 0.12f,
-        .reward_step = -0.001f,
+        .min_power = 0.35f,
+        .reward_step = 0.0f,
+        .reward_shot = -0.01f,
+        .reward_progress = 0.5f,
         .reward_pot_object = 1.0f,
         .reward_scratch = -0.5f,
         .fast_forward = 0,
@@ -19,7 +22,7 @@ int main() {
     };
 
     env.observations = (float*)calloc(11, sizeof(float));
-    env.actions = (int*)calloc(1, sizeof(int));
+    env.actions = (int*)calloc(2, sizeof(int));
     env.rewards = (float*)calloc(1, sizeof(float));
     env.terminals = (unsigned char*)calloc(1, sizeof(unsigned char));
 
@@ -28,15 +31,22 @@ int main() {
 
     while (!WindowShouldClose()) {
         env.actions[0] = 0;
+        env.actions[1] = 4;
 
         if (IsKeyDown(KEY_LEFT_SHIFT)) {
             if (IsKeyPressed(KEY_RIGHT)) env.actions[0] = 1;   // 0 deg
             if (IsKeyPressed(KEY_DOWN)) env.actions[0] = 5;    // 90 deg
             if (IsKeyPressed(KEY_LEFT)) env.actions[0] = 9;    // 180 deg
             if (IsKeyPressed(KEY_UP)) env.actions[0] = 13;     // 270 deg
+            if (IsKeyPressed(KEY_ONE)) env.actions[1] = 0;
+            if (IsKeyPressed(KEY_TWO)) env.actions[1] = 1;
+            if (IsKeyPressed(KEY_THREE)) env.actions[1] = 2;
+            if (IsKeyPressed(KEY_FOUR)) env.actions[1] = 3;
+            if (IsKeyPressed(KEY_FIVE)) env.actions[1] = 4;
         } else {
             if ((rand() % 18) == 0) {
                 env.actions[0] = 1 + (rand() % 16);
+                env.actions[1] = rand() % 5;
             }
         }
 

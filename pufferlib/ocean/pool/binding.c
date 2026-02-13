@@ -11,7 +11,10 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->friction = unpack(kwargs, "friction");
     env->restitution = unpack(kwargs, "restitution");
     env->impulse = unpack(kwargs, "impulse");
+    env->min_power = unpack(kwargs, "min_power");
     env->reward_step = unpack(kwargs, "reward_step");
+    env->reward_shot = unpack(kwargs, "reward_shot");
+    env->reward_progress = unpack(kwargs, "reward_progress");
     env->reward_pot_object = unpack(kwargs, "reward_pot_object");
     env->reward_scratch = unpack(kwargs, "reward_scratch");
     env->fast_forward = unpack(kwargs, "fast_forward");
@@ -26,6 +29,7 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     if (env->friction <= 0.0f || env->friction > 1.0f) env->friction = 0.992f;
     if (env->restitution < 0.0f || env->restitution > 1.0f) env->restitution = 0.96f;
     if (env->impulse <= 0.0f) env->impulse = 0.12f;
+    if (env->min_power < 0.0f || env->min_power > 1.0f) env->min_power = 0.35f;
     if (env->max_physics_steps < 1) env->max_physics_steps = 256;
     env->fast_forward = env->fast_forward ? 1 : 0;
     if (env->max_steps < 1) env->max_steps = 300;
