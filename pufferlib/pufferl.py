@@ -540,7 +540,23 @@ class PuffeRL:
         if os.path.exists(model_path):
             return model_path
 
-        torch.save(self.uncompiled_policy.state_dict(), model_path)
+        save_policy = self.uncompiled_policy
+        if hasattr(save_policy, 'module'):
+            save_policy = save_policy.module
+        if hasattr(save_policy, '_orig_mod'):
+            save_policy = save_policy._orig_mod
+
+        try:
+            state_dict = save_policy.state_dict()
+        except RecursionError:
+            # Fallback for rare module graph cycles introduced by wrappers/compilers.
+            state_dict = {}
+            for name, param in save_policy.named_parameters(recurse=True):
+                state_dict[name] = param.detach()
+            for name, buf in save_policy.named_buffers(recurse=True):
+                state_dict[name] = buf.detach()
+
+        torch.save(state_dict, model_path)
 
         state = {
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -1287,6 +1303,17 @@ def process_config(config, parser=None):
     parser.description = f':blowfish: PufferLib [bright_cyan]{pufferlib.__version__}[/]' \
         ' demo options. Shows valid args for your env and policy'
 
+    def parse_bool(value):
+        """Robust bool parser for CLI/config overrides."""
+        if isinstance(value, bool):
+            return value
+        s = str(value).strip().lower()
+        if s in ('1', 'true', 't', 'yes', 'y', 'on'):
+            return True
+        if s in ('0', 'false', 'f', 'no', 'n', 'off'):
+            return False
+        raise argparse.ArgumentTypeError(f'Invalid boolean value: {value}')
+
     def auto_type(value):
         """Type inference for numeric args that use 'auto' as a default value"""
         if value == 'auto': return value
@@ -1304,7 +1331,7 @@ def process_config(config, parser=None):
             parser.add_argument(
                 fmt.replace('_', '-'),
                 default=value,
-                type=auto_type if value == 'auto' else type(value)
+                type=parse_bool if isinstance(value, bool) else (auto_type if value == 'auto' else type(value))
             )
 
     parser.add_argument('-h', '--help', default=argparse.SUPPRESS,
