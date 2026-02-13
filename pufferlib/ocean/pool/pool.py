@@ -43,10 +43,10 @@ class Pool(pufferlib.PufferEnv):
             shape=(89,),
             dtype=np.float32,
         )
-        # Action[0]: 0 no-op, 1..16 shot direction around 360 degrees
+        # Action[0]: shot direction in [0..15] around 360 degrees
         # Action[1]: power bin in [0..4]
         self.single_action_space = gymnasium.spaces.MultiDiscrete(
-            [17, 5], dtype=np.int32
+            [16, 5], dtype=np.int32
         )
 
         super().__init__(buf)
@@ -120,7 +120,7 @@ def test_performance(timeout=10, atn_cache=1024):
 
     tick = 0
     actions = np.empty((atn_cache, env.num_agents, 2), dtype=np.int32)
-    actions[..., 0] = np.random.randint(0, 17, (atn_cache, env.num_agents), dtype=np.int32)
+    actions[..., 0] = np.random.randint(0, 16, (atn_cache, env.num_agents), dtype=np.int32)
     actions[..., 1] = np.random.randint(0, 5, (atn_cache, env.num_agents), dtype=np.int32)
 
     import time

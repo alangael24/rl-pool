@@ -39,10 +39,10 @@ int main() {
 
         if (env.current_player == 0) {
             if (IsKeyDown(KEY_LEFT_SHIFT)) {
-                if (IsKeyPressed(KEY_RIGHT)) env.actions[0] = 1;
-                if (IsKeyPressed(KEY_DOWN)) env.actions[0] = 5;
-                if (IsKeyPressed(KEY_LEFT)) env.actions[0] = 9;
-                if (IsKeyPressed(KEY_UP)) env.actions[0] = 13;
+                if (IsKeyPressed(KEY_RIGHT)) env.actions[0] = 0;
+                if (IsKeyPressed(KEY_DOWN)) env.actions[0] = 4;
+                if (IsKeyPressed(KEY_LEFT)) env.actions[0] = 8;
+                if (IsKeyPressed(KEY_UP)) env.actions[0] = 12;
                 if (IsKeyPressed(KEY_ONE)) env.actions[1] = 0;
                 if (IsKeyPressed(KEY_TWO)) env.actions[1] = 1;
                 if (IsKeyPressed(KEY_THREE)) env.actions[1] = 2;
@@ -51,7 +51,7 @@ int main() {
             }
         } else {
             if ((rand() % 18) == 0) {
-                env.actions[2] = 1 + (rand() % 16);
+                env.actions[2] = rand() % 16;
                 env.actions[3] = rand() % 5;
             }
         }

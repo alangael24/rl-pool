@@ -445,7 +445,7 @@ static inline bool maybe_take_shot(Pool* env) {
     int direction_action = env->actions[action_base];
     int power_action = env->actions[action_base + 1];
 
-    if (direction_action <= 0 || !balls_stationary(env)) {
+    if (!balls_stationary(env)) {
         return false;
     }
 
@@ -454,8 +454,10 @@ static inline bool maybe_take_shot(Pool* env) {
         env->ball_in_hand = 0;
     }
 
-    int dir_idx = (direction_action - 1) % NUM_SHOT_DIRS;
+    int dir_idx = direction_action % NUM_SHOT_DIRS;
+    if (dir_idx < 0) dir_idx += NUM_SHOT_DIRS;
     int pwr_idx = power_action % NUM_POWER_BINS;
+    if (pwr_idx < 0) pwr_idx += NUM_POWER_BINS;
     float shot_impulse = env->shot_impulses[pwr_idx];
 
     env->ball_vx[CUE_BALL] += env->shot_cos[dir_idx] * shot_impulse;
@@ -640,7 +642,7 @@ void c_step(Pool* env) {
             evaluate_shot(env, shooter, potted, scratch, first_hit, &done);
         }
     } else {
-        env->rewards[shooter] += 0.5f * env->reward_shot;
+        env->rewards[shooter] -= 0.01f;
     }
 
     if (!done && env->winner >= 0) {
