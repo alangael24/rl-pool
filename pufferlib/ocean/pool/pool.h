@@ -48,6 +48,8 @@ struct Pool {
     float reward_step;
     float reward_pot_object;
     float reward_scratch;
+    unsigned char fast_forward;
+    int max_physics_steps;
 
     int max_steps;
 
@@ -68,12 +70,6 @@ struct Pool {
     float episode_return;
     int shots_taken;
 };
-
-static inline float clampf(float x, float lo, float hi) {
-    if (x < lo) return lo;
-    if (x > hi) return hi;
-    return x;
-}
 
 static inline float randf(float lo, float hi) {
     return lo + ((float)rand() / (float)RAND_MAX) * (hi - lo);
@@ -262,13 +258,7 @@ static inline void maybe_take_shot(Pool* env) {
     env->shots_taken += 1;
 }
 
-void c_step(Pool* env) {
-    env->rewards[0] = env->reward_step;
-    env->terminals[0] = 0;
-
-    env->tick += 1;
-    maybe_take_shot(env);
-
+static inline void simulate_physics_step(Pool* env) {
     env->cue_x += env->cue_vx;
     env->cue_y += env->cue_vy;
     env->obj_x += env->obj_vx;
@@ -290,22 +280,45 @@ void c_step(Pool* env) {
     if (fabsf(env->cue_vy) < STATIONARY_EPS) env->cue_vy = 0.0f;
     if (fabsf(env->obj_vx) < STATIONARY_EPS) env->obj_vx = 0.0f;
     if (fabsf(env->obj_vy) < STATIONARY_EPS) env->obj_vy = 0.0f;
+}
 
-    bool object_potted = dist_sq(env->obj_x, env->obj_y, env->pocket_x, env->pocket_y) <= env->pocket_radius * env->pocket_radius;
-    bool cue_potted = dist_sq(env->cue_x, env->cue_y, env->pocket_x, env->pocket_y) <= env->pocket_radius * env->pocket_radius;
+void c_step(Pool* env) {
+    env->rewards[0] = 0.0f;
+    env->terminals[0] = 0;
+
+    env->tick += 1;
+    maybe_take_shot(env);
 
     bool done = false;
     bool success = false;
-
-    if (object_potted) {
-        env->rewards[0] += env->reward_pot_object;
-        done = true;
-        success = true;
+    int max_substeps = env->fast_forward ? env->max_physics_steps : 1;
+    if (max_substeps < 1) {
+        max_substeps = 1;
     }
 
-    if (cue_potted) {
-        env->rewards[0] += env->reward_scratch;
-        done = true;
+    for (int substep = 0; substep < max_substeps; substep++) {
+        simulate_physics_step(env);
+        env->rewards[0] += env->reward_step;
+
+        bool object_potted = dist_sq(env->obj_x, env->obj_y, env->pocket_x, env->pocket_y) <= env->pocket_radius * env->pocket_radius;
+        bool cue_potted = dist_sq(env->cue_x, env->cue_y, env->pocket_x, env->pocket_y) <= env->pocket_radius * env->pocket_radius;
+
+        if (object_potted) {
+            env->rewards[0] += env->reward_pot_object;
+            done = true;
+            success = true;
+            break;
+        }
+
+        if (cue_potted) {
+            env->rewards[0] += env->reward_scratch;
+            done = true;
+            break;
+        }
+
+        if (env->fast_forward && balls_stationary(env)) {
+            break;
+        }
     }
 
     if (env->tick >= env->max_steps) {

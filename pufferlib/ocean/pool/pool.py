@@ -19,6 +19,8 @@ class Pool(pufferlib.PufferEnv):
         reward_step=-0.001,
         reward_pot_object=1.0,
         reward_scratch=-0.5,
+        fast_forward=True,
+        max_physics_steps=256,
         max_steps=300,
         report_interval=64,
         render_mode='human',
@@ -59,6 +61,8 @@ class Pool(pufferlib.PufferEnv):
             reward_step=reward_step,
             reward_pot_object=reward_pot_object,
             reward_scratch=reward_scratch,
+            fast_forward=fast_forward,
+            max_physics_steps=max_physics_steps,
             max_steps=max_steps,
         )
 

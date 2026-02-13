@@ -13,6 +13,8 @@ int main() {
         .reward_step = -0.001f,
         .reward_pot_object = 1.0f,
         .reward_scratch = -0.5f,
+        .fast_forward = 0,
+        .max_physics_steps = 256,
         .max_steps = 300,
     };
 
