@@ -8,7 +8,7 @@ from pufferlib.ocean.pool import binding
 class Pool(pufferlib.PufferEnv):
     def __init__(
         self,
-        num_envs=1,
+        num_envs=256,
         width=2.84,
         height=1.42,
         ball_radius=0.03,
@@ -18,27 +18,29 @@ class Pool(pufferlib.PufferEnv):
         impulse=0.12,
         min_power=0.35,
         reward_step=0.0,
-        reward_shot=-0.01,
-        reward_progress=0.5,
-        reward_pot_object=1.0,
-        reward_scratch=-0.5,
+        reward_shot=-0.001,
+        reward_legal_pot=0.03,
+        reward_illegal_pot=-0.015,
+        reward_foul=-0.05,
+        reward_win=1.0,
         fast_forward=True,
-        max_physics_steps=256,
-        max_steps=300,
-        report_interval=64,
+        max_physics_steps=192,
+        max_steps=200,
+        report_interval=128,
         render_mode='human',
         buf=None,
         seed=0,
     ):
         self.render_mode = render_mode
-        self.num_agents = num_envs
+        self.num_tables = num_envs
+        self.num_agents = num_envs * 2
         self.report_interval = report_interval
         self.tick = 0
 
         self.single_observation_space = gymnasium.spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(11,),
+            shape=(89,),
             dtype=np.float32,
         )
         # Action[0]: 0 no-op, 1..16 shot direction around 360 degrees
@@ -49,31 +51,38 @@ class Pool(pufferlib.PufferEnv):
 
         super().__init__(buf)
 
-        self.c_envs = binding.vec_init(
-            self.observations,
-            self.actions,
-            self.rewards,
-            self.terminals,
-            self.truncations,
-            num_envs,
-            seed,
-            width=width,
-            height=height,
-            ball_radius=ball_radius,
-            pocket_radius=pocket_radius,
-            friction=friction,
-            restitution=restitution,
-            impulse=impulse,
-            min_power=min_power,
-            reward_step=reward_step,
-            reward_shot=reward_shot,
-            reward_progress=reward_progress,
-            reward_pot_object=reward_pot_object,
-            reward_scratch=reward_scratch,
-            fast_forward=fast_forward,
-            max_physics_steps=max_physics_steps,
-            max_steps=max_steps,
-        )
+        c_envs = []
+        for i in range(num_envs):
+            start = 2 * i
+            end = start + 2
+            env_id = binding.env_init(
+                self.observations[start:end],
+                self.actions[start:end],
+                self.rewards[start:end],
+                self.terminals[start:end],
+                self.truncations[start:end],
+                i + seed * num_envs,
+                width=width,
+                height=height,
+                ball_radius=ball_radius,
+                pocket_radius=pocket_radius,
+                friction=friction,
+                restitution=restitution,
+                impulse=impulse,
+                min_power=min_power,
+                reward_step=reward_step,
+                reward_shot=reward_shot,
+                reward_legal_pot=reward_legal_pot,
+                reward_illegal_pot=reward_illegal_pot,
+                reward_foul=reward_foul,
+                reward_win=reward_win,
+                fast_forward=fast_forward,
+                max_physics_steps=max_physics_steps,
+                max_steps=max_steps,
+            )
+            c_envs.append(env_id)
+
+        self.c_envs = binding.vectorize(*c_envs)
 
     def reset(self, seed=None):
         self.tick = 0
@@ -105,14 +114,14 @@ class Pool(pufferlib.PufferEnv):
 
 
 def test_performance(timeout=10, atn_cache=1024):
-    num_envs = 4096
+    num_envs = 1024
     env = Pool(num_envs=num_envs)
     env.reset()
 
     tick = 0
-    actions = np.empty((atn_cache, num_envs, 2), dtype=np.int32)
-    actions[..., 0] = np.random.randint(0, 17, (atn_cache, num_envs), dtype=np.int32)
-    actions[..., 1] = np.random.randint(0, 5, (atn_cache, num_envs), dtype=np.int32)
+    actions = np.empty((atn_cache, env.num_agents, 2), dtype=np.int32)
+    actions[..., 0] = np.random.randint(0, 17, (atn_cache, env.num_agents), dtype=np.int32)
+    actions[..., 1] = np.random.randint(0, 5, (atn_cache, env.num_agents), dtype=np.int32)
 
     import time
 
@@ -121,7 +130,7 @@ def test_performance(timeout=10, atn_cache=1024):
         env.step(actions[tick % atn_cache])
         tick += 1
 
-    sps = num_envs * tick / (time.time() - start)
+    sps = env.num_agents * tick / (time.time() - start)
     print(f'SPS: {sps:,}')
 
 
