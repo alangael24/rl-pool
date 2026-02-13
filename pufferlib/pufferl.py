@@ -248,7 +248,6 @@ class PuffeRL:
             profile('eval_misc', epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
 
-            done_mask = d + t # TODO: Handle truncations separately
             self.global_step += int(mask.sum())
 
             profile('eval_copy', epoch)
@@ -256,12 +255,14 @@ class PuffeRL:
             o_device = o.to(device)#, non_blocking=True)
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
             d = torch.as_tensor(d).to(device)#, non_blocking=True)
+            t = torch.as_tensor(t).to(device)#, non_blocking=True)
+            done_mask = torch.logical_or(d.bool(), t.bool())
 
             profile('eval_forward', epoch)
             with torch.no_grad(), self.amp_context:
                 state = dict(
                     reward=r,
-                    done=d,
+                    done=done_mask,
                     env_id=env_id,
                     mask=mask,
                 )
@@ -293,6 +294,7 @@ class PuffeRL:
                 self.logprobs[batch_rows, l] = logprob
                 self.rewards[batch_rows, l] = r
                 self.terminals[batch_rows, l] = d.float()
+                self.truncations[batch_rows, l] = t.float()
                 self.values[batch_rows, l] = value.flatten()
 
                 # Note: We are not yet handling masks in this version
@@ -344,16 +346,18 @@ class PuffeRL:
         vf_clip = config['vf_clip_coef']
         anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
         self.ratio[:] = 1
+        recompute_advantages = config.get('recompute_advantage_each_minibatch', True)
+        advantages = torch.zeros(self.values.shape, device=device)
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch)
             self.amp_context.__enter__()
 
-            shape = self.values.shape
-            advantages = torch.zeros(shape, device=device)
-            advantages = compute_puff_advantage(self.values, self.rewards,
-                self.terminals, self.ratio, advantages, config['gamma'],
-                config['gae_lambda'], config['vtrace_rho_clip'], config['vtrace_c_clip'])
+            if mb == 0 or recompute_advantages:
+                advantages.zero_()
+                advantages = compute_puff_advantage(self.values, self.rewards,
+                    self.terminals, self.ratio, advantages, config['gamma'],
+                    config['gae_lambda'], config['vtrace_rho_clip'], config['vtrace_c_clip'])
 
             # Prioritize experience by advantage magnitude
             adv = advantages.abs().sum(axis=1)

@@ -133,7 +133,7 @@ static PyObject* env_init(PyObject* self, PyObject* args, PyObject* kwargs) {
         PyErr_SetString(PyExc_ValueError, "Truncations must be 1D");
         return NULL;
     }
-    // env->truncations = PyArray_DATA(truncations);
+    env->truncations = PyArray_DATA(truncations);
     
     
     PyObject* seed_arg = PyTuple_GetItem(args, 5);
@@ -165,6 +165,7 @@ static PyObject* env_init(PyObject* self, PyObject* args, PyObject* kwargs) {
 
     PyObject* empty_args = PyTuple_New(0);
     my_init(env, empty_args, kwargs);
+    Py_DECREF(empty_args);
     Py_DECREF(kwargs);
     if (PyErr_Occurred()) {
         return NULL;
@@ -252,6 +253,7 @@ static PyObject* env_put(PyObject* self, PyObject* args, PyObject* kwargs) {
 
     PyObject* empty_args = PyTuple_New(0);
     my_put(env, empty_args, kwargs);
+    Py_DECREF(empty_args);
     if (PyErr_Occurred()) {
         return NULL;
     }
@@ -418,7 +420,7 @@ static PyObject* vec_init(PyObject* self, PyObject* args, PyObject* kwargs) {
         env->actions = (void*)((char*)PyArray_DATA(actions) + i*PyArray_STRIDE(actions, 0));
         env->rewards = (void*)((char*)PyArray_DATA(rewards) + i*PyArray_STRIDE(rewards, 0));
         env->terminals = (void*)((char*)PyArray_DATA(terminals) + i*PyArray_STRIDE(terminals, 0));
-        // env->truncations = (void*)((char*)PyArray_DATA(truncations) + i*PyArray_STRIDE(truncations, 0));
+        env->truncations = (void*)((char*)PyArray_DATA(truncations) + i*PyArray_STRIDE(truncations, 0));
 
         // Assumes each process has the same number of environments
         int env_seed = i + seed*vec->num_envs;
@@ -436,6 +438,7 @@ static PyObject* vec_init(PyObject* self, PyObject* args, PyObject* kwargs) {
 
         PyObject* empty_args = PyTuple_New(0);
         my_init(env, empty_args, kwargs);
+        Py_DECREF(empty_args);
         if (PyErr_Occurred()) {
             return NULL;
         }

@@ -56,6 +56,16 @@ struct Pool {
     int max_physics_steps;
 
     int max_steps;
+    float inv_max_steps;
+
+    float inv_table_width;
+    float inv_table_height;
+    float inv_vel_scale;
+    float inv_table_diag;
+    float pocket_radius_sq;
+    float shot_cos[NUM_SHOT_DIRS];
+    float shot_sin[NUM_SHOT_DIRS];
+    float shot_impulses[NUM_POWER_BINS];
 
     float cue_x;
     float cue_y;
@@ -147,23 +157,47 @@ static inline void sample_balls(Pool* env) {
     env->obj_y = env->table_height * 0.50f;
 }
 
-void compute_observations(Pool* env) {
+static inline void update_derived_constants(Pool* env) {
+    float width = fmaxf(env->table_width, 1e-6f);
+    float height = fmaxf(env->table_height, 1e-6f);
+    float diag = sqrtf(width * width + height * height);
     float vel_scale = fmaxf(env->impulse, 1e-3f);
 
-    env->observations[0] = env->cue_x / env->table_width;
-    env->observations[1] = env->cue_y / env->table_height;
-    env->observations[2] = env->cue_vx / vel_scale;
-    env->observations[3] = env->cue_vy / vel_scale;
+    env->inv_table_width = 1.0f / width;
+    env->inv_table_height = 1.0f / height;
+    env->inv_vel_scale = 1.0f / vel_scale;
+    env->inv_table_diag = 1.0f / fmaxf(diag, 1e-6f);
+    env->inv_max_steps = 1.0f / fmaxf((float)env->max_steps, 1.0f);
+    env->pocket_radius_sq = env->pocket_radius * env->pocket_radius;
 
-    env->observations[4] = env->obj_x / env->table_width;
-    env->observations[5] = env->obj_y / env->table_height;
-    env->observations[6] = env->obj_vx / vel_scale;
-    env->observations[7] = env->obj_vy / vel_scale;
+    for (int i = 0; i < NUM_SHOT_DIRS; i++) {
+        float angle = (2.0f * PI * (float)i) / (float)NUM_SHOT_DIRS;
+        env->shot_cos[i] = cosf(angle);
+        env->shot_sin[i] = sinf(angle);
+    }
 
-    env->observations[8] = env->pocket_x / env->table_width;
-    env->observations[9] = env->pocket_y / env->table_height;
+    for (int i = 0; i < NUM_POWER_BINS; i++) {
+        float power_frac = (float)i / (float)(NUM_POWER_BINS - 1);
+        float power_scale = env->min_power + (1.0f - env->min_power) * power_frac;
+        env->shot_impulses[i] = env->impulse * power_scale;
+    }
+}
 
-    env->observations[10] = 1.0f - ((float)env->tick / (float)env->max_steps);
+void compute_observations(Pool* env) {
+    env->observations[0] = env->cue_x * env->inv_table_width;
+    env->observations[1] = env->cue_y * env->inv_table_height;
+    env->observations[2] = env->cue_vx * env->inv_vel_scale;
+    env->observations[3] = env->cue_vy * env->inv_vel_scale;
+
+    env->observations[4] = env->obj_x * env->inv_table_width;
+    env->observations[5] = env->obj_y * env->inv_table_height;
+    env->observations[6] = env->obj_vx * env->inv_vel_scale;
+    env->observations[7] = env->obj_vy * env->inv_vel_scale;
+
+    env->observations[8] = env->pocket_x * env->inv_table_width;
+    env->observations[9] = env->pocket_y * env->inv_table_height;
+
+    env->observations[10] = 1.0f - ((float)env->tick * env->inv_max_steps);
 }
 
 static inline void add_episode_log(Pool* env, bool object_potted) {
@@ -178,6 +212,7 @@ static inline void add_episode_log(Pool* env, bool object_potted) {
 void init(Pool* env) {
     memset(&env->log, 0, sizeof(Log));
     env->client = NULL;
+    update_derived_constants(env);
 }
 
 void c_reset(Pool* env) {
@@ -258,13 +293,9 @@ static inline bool maybe_take_shot(Pool* env) {
 
     int dir_idx = (direction_action - 1) % NUM_SHOT_DIRS;
     int pwr_idx = power_action % NUM_POWER_BINS;
-    float power_frac = (float)pwr_idx / (float)(NUM_POWER_BINS - 1);
-    float power_scale = env->min_power + (1.0f - env->min_power) * power_frac;
-    float shot_impulse = env->impulse * power_scale;
-
-    float angle = (2.0f * PI * (float)dir_idx) / (float)NUM_SHOT_DIRS;
-    env->cue_vx += cosf(angle) * shot_impulse;
-    env->cue_vy += sinf(angle) * shot_impulse;
+    float shot_impulse = env->shot_impulses[pwr_idx];
+    env->cue_vx += env->shot_cos[dir_idx] * shot_impulse;
+    env->cue_vy += env->shot_sin[dir_idx] * shot_impulse;
     env->shots_taken += 1;
     env->rewards[0] += env->reward_shot;
     return true;
@@ -297,25 +328,34 @@ static inline void simulate_physics_step(Pool* env) {
 void c_step(Pool* env) {
     env->rewards[0] = 0.0f;
     env->terminals[0] = 0;
+    env->truncations[0] = 0;
 
     env->tick += 1;
-    float table_diag = sqrtf(env->table_width * env->table_width + env->table_height * env->table_height);
-    float start_dist = sqrtf(dist_sq(env->obj_x, env->obj_y, env->pocket_x, env->pocket_y));
     bool shot_fired = maybe_take_shot(env);
+    float start_dist = 0.0f;
+    if (shot_fired && env->reward_progress != 0.0f) {
+        start_dist = sqrtf(dist_sq(env->obj_x, env->obj_y, env->pocket_x, env->pocket_y));
+    }
 
     bool done = false;
     bool success = false;
+    bool timeout = false;
     int max_substeps = env->fast_forward ? env->max_physics_steps : 1;
     if (max_substeps < 1) {
         max_substeps = 1;
+    }
+
+    if (env->fast_forward && !shot_fired && balls_stationary(env)) {
+        env->rewards[0] += env->reward_step;
+        goto finalize_step;
     }
 
     for (int substep = 0; substep < max_substeps; substep++) {
         simulate_physics_step(env);
         env->rewards[0] += env->reward_step;
 
-        bool object_potted = dist_sq(env->obj_x, env->obj_y, env->pocket_x, env->pocket_y) <= env->pocket_radius * env->pocket_radius;
-        bool cue_potted = dist_sq(env->cue_x, env->cue_y, env->pocket_x, env->pocket_y) <= env->pocket_radius * env->pocket_radius;
+        bool object_potted = dist_sq(env->obj_x, env->obj_y, env->pocket_x, env->pocket_y) <= env->pocket_radius_sq;
+        bool cue_potted = dist_sq(env->cue_x, env->cue_y, env->pocket_x, env->pocket_y) <= env->pocket_radius_sq;
 
         if (object_potted) {
             env->rewards[0] += env->reward_pot_object;
@@ -335,20 +375,23 @@ void c_step(Pool* env) {
         }
     }
 
-    if (shot_fired) {
+    if (shot_fired && env->reward_progress != 0.0f) {
         float end_dist = sqrtf(dist_sq(env->obj_x, env->obj_y, env->pocket_x, env->pocket_y));
-        float progress = (start_dist - end_dist) / fmaxf(table_diag, 1e-6f);
+        float progress = (start_dist - end_dist) * env->inv_table_diag;
         env->rewards[0] += env->reward_progress * progress;
     }
 
-    if (env->tick >= env->max_steps) {
+finalize_step:
+    if (!done && env->tick >= env->max_steps) {
         done = true;
+        timeout = true;
     }
 
     env->episode_return += env->rewards[0];
 
     if (done) {
         env->terminals[0] = 1;
+        env->truncations[0] = timeout ? 1 : 0;
         add_episode_log(env, success);
         c_reset(env);
         return;
