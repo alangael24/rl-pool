@@ -310,7 +310,7 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("hypers", &PuffeRL::hypers)
         .def_readwrite("rollouts", &PuffeRL::rollouts);
 
-    py::class_<PolicyLSTM, std::shared_ptr<PolicyLSTM>, torch::nn::Module> cls(m, "PolicyLSTM");
+    py::class_<PolicyLSTM, std::shared_ptr<PolicyLSTM>> cls(m, "PolicyLSTM");
     cls.def(py::init<int, int, int>());
     cls.def("forward", &PolicyLSTM::forward);
     cls.def("forward_train", &PolicyLSTM::forward_train);
@@ -319,8 +319,8 @@ PYBIND11_MODULE(_C, m) {
         .def_readwrite("mean", &Logits::mean)
         .def_readwrite("logstd", &Logits::logstd);
 
-    py::class_<Encoder, std::shared_ptr<Encoder>, torch::nn::Module>(m, "Encoder");
-    py::class_<Decoder, std::shared_ptr<Decoder>, torch::nn::Module>(m, "Decoder");
+    py::class_<Encoder, std::shared_ptr<Encoder>>(m, "Encoder");
+    py::class_<Decoder, std::shared_ptr<Decoder>>(m, "Decoder");
     py::class_<DefaultEncoder, std::shared_ptr<DefaultEncoder>, Encoder>(m, "DefaultEncoder")
         .def(py::init<int, int>());
     py::class_<SnakeEncoder, std::shared_ptr<SnakeEncoder>, Encoder>(m, "SnakeEncoder")
@@ -338,11 +338,11 @@ PYBIND11_MODULE(_C, m) {
     py::class_<DriveEncoder, std::shared_ptr<DriveEncoder>, Encoder>(m, "DriveEncoder")
         .def(py::init<int, int>());
 
-    py::class_<RNN, std::shared_ptr<RNN>, torch::nn::Module>(m, "RNN");
+    py::class_<RNN, std::shared_ptr<RNN>>(m, "RNN");
     py::class_<MinGRU, std::shared_ptr<MinGRU>, RNN>(m, "MinGRU")
         .def(py::init<int, int, bool>(), py::arg("hidden"), py::arg("num_layers") = 1, py::arg("kernels") = true);
 
-    py::class_<Policy, std::shared_ptr<Policy>, torch::nn::Module> cls2(m, "Policy");
+    py::class_<Policy, std::shared_ptr<Policy>> cls2(m, "Policy");
     cls2.def(py::init<std::shared_ptr<Encoder>, std::shared_ptr<Decoder>, std::shared_ptr<RNN>, int, int, int>());
     cls2.def("forward", &Policy::forward);
     cls2.def("forward_train", &Policy::forward_train);

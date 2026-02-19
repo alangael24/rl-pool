@@ -1040,7 +1040,37 @@ class CppPuffeRL:
         self.profile = {}
         self.utilization = {}
         self.msg = ''
-        self.model_size = sum(p.numel() for p in self.policy_fp32.parameters() if p.requires_grad)
+        self.model_size = self._model_numel()
+
+    def _model_numel(self):
+        if hasattr(self.policy_fp32, 'parameters'):
+            try:
+                return sum(
+                    int(p.numel()) for p in self.policy_fp32.parameters()
+                    if getattr(p, 'requires_grad', True)
+                )
+            except Exception:
+                pass
+
+        muon = getattr(self.pufferl_cpp, 'muon', None)
+        weight_buffer = getattr(muon, 'weight_buffer', None)
+        if torch.is_tensor(weight_buffer):
+            return int(weight_buffer.numel())
+        return 0
+
+    def _model_state_dict(self):
+        if hasattr(self.policy_fp32, 'named_parameters'):
+            try:
+                return dict(self.policy_fp32.named_parameters())
+            except Exception:
+                pass
+
+        muon = getattr(self.pufferl_cpp, 'muon', None)
+        weight_buffer = getattr(muon, 'weight_buffer', None)
+        if torch.is_tensor(weight_buffer):
+            return {'weight_buffer': weight_buffer.detach().cpu()}
+
+        return {}
 
     @property
     def uptime(self):
@@ -1079,7 +1109,7 @@ class CppPuffeRL:
         model_name = f'model_{self.config["env"]}_{self.epoch:06d}.pt'
         model_path = os.path.join(path, model_name)
         if not os.path.exists(model_path):
-            torch.save(dict(self.policy_fp32.named_parameters()), model_path)
+            torch.save(self._model_state_dict(), model_path)
 
         state = {
             'global_step': self.global_step,
