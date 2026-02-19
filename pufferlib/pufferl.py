@@ -272,7 +272,7 @@ class PuffeRL:
                         'Use --vec.sync-traj true or --vec.zero-copy true.'
                     )
 
-            self.global_step += int(mask.sum())
+            mask_arr = np.asarray(mask)
 
             profile('eval_copy', epoch)
             o = torch.as_tensor(o)
@@ -307,6 +307,7 @@ class PuffeRL:
 
                 # Fast path for contiguous agent batches
                 if eval_sync_traj and env_slice is not None:
+                    self.global_step += int(mask_arr.sum())
                     l = self.ep_lengths[env_slice.start].item()
                     batch_rows = slice(self.ep_indices[env_slice.start].item(),
                         1 + self.ep_indices[env_slice.stop - 1].item())
@@ -337,6 +338,8 @@ class PuffeRL:
                     keep = active_envs[env_id_t]
                     if keep.any():
                         keep_idx = torch.nonzero(keep, as_tuple=False).flatten()
+                        keep_idx_cpu = keep_idx.detach().cpu().numpy()
+                        self.global_step += int(mask_arr[keep_idx_cpu].sum())
                         keep_envs = env_id_t[keep_idx]
                         rows = self.ep_indices[keep_envs].long()
                         cols = self.ep_lengths[keep_envs].long()
