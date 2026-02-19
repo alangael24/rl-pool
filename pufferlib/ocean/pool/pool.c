@@ -18,7 +18,7 @@ int main() {
         .reward_foul = -0.05f,
         .reward_win = 1.0f,
         .fast_forward = 0,
-        .max_physics_steps = 192,
+        .max_physics_steps = 128,
         .max_steps = 200,
     };
 

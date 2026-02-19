@@ -24,7 +24,7 @@ class Pool(pufferlib.PufferEnv):
         reward_foul=-0.05,
         reward_win=1.0,
         fast_forward=True,
-        max_physics_steps=192,
+        max_physics_steps=128,
         max_steps=200,
         report_interval=128,
         render_mode='human',
