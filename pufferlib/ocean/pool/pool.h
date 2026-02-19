@@ -299,8 +299,11 @@ static inline void update_derived_constants(Pool* env) {
     set_pockets(env);
 }
 
-static inline void compute_single_observation(Pool* env, int player, float* obs) {
+void compute_observations(Pool* env) {
+    float* obs0 = env->observations + 0 * OBS_SIZE;
+    float* obs1 = env->observations + 1 * OBS_SIZE;
     int idx = 0;
+
     for (int i = 0; i < NUM_BALLS; i++) {
         float alive = env->ball_alive[i] ? 1.0f : 0.0f;
         float x = env->ball_alive[i] ? env->ball_x[i] : 0.0f;
@@ -308,33 +311,48 @@ static inline void compute_single_observation(Pool* env, int player, float* obs)
         float vx = env->ball_alive[i] ? env->ball_vx[i] : 0.0f;
         float vy = env->ball_alive[i] ? env->ball_vy[i] : 0.0f;
 
-        obs[idx++] = x * env->inv_table_width;
-        obs[idx++] = y * env->inv_table_height;
-        obs[idx++] = vx * env->inv_vel_scale;
-        obs[idx++] = vy * env->inv_vel_scale;
-        obs[idx++] = alive;
+        float nx = x * env->inv_table_width;
+        float ny = y * env->inv_table_height;
+        float nvx = vx * env->inv_vel_scale;
+        float nvy = vy * env->inv_vel_scale;
+
+        obs0[idx] = nx;
+        obs1[idx++] = nx;
+        obs0[idx] = ny;
+        obs1[idx++] = ny;
+        obs0[idx] = nvx;
+        obs1[idx++] = nvx;
+        obs0[idx] = nvy;
+        obs1[idx++] = nvy;
+        obs0[idx] = alive;
+        obs1[idx++] = alive;
     }
 
-    int opp = 1 - player;
-    int my_group = env->player_group[player];
-    int opp_group = env->player_group[opp];
-    int my_remaining = my_group == GROUP_UNKNOWN ? 7 : count_remaining_group(env, my_group);
-    int opp_remaining = opp_group == GROUP_UNKNOWN ? 7 : count_remaining_group(env, opp_group);
+    int p0_group = env->player_group[0];
+    int p1_group = env->player_group[1];
+    int p0_remaining = p0_group == GROUP_UNKNOWN ? 7 : count_remaining_group(env, p0_group);
+    int p1_remaining = p1_group == GROUP_UNKNOWN ? 7 : count_remaining_group(env, p1_group);
+    float in_hand = env->ball_in_hand ? 1.0f : 0.0f;
+    float tick_frac = 1.0f - ((float)env->tick * env->inv_max_steps);
 
-    obs[idx++] = env->current_player == player ? 1.0f : 0.0f;
-    obs[idx++] = my_group == GROUP_SOLIDS ? 1.0f : 0.0f;
-    obs[idx++] = my_group == GROUP_STRIPES ? 1.0f : 0.0f;
-    obs[idx++] = opp_group == GROUP_SOLIDS ? 1.0f : 0.0f;
-    obs[idx++] = opp_group == GROUP_STRIPES ? 1.0f : 0.0f;
-    obs[idx++] = (float)my_remaining / 7.0f;
-    obs[idx++] = (float)opp_remaining / 7.0f;
-    obs[idx++] = env->ball_in_hand ? 1.0f : 0.0f;
-    obs[idx++] = 1.0f - ((float)env->tick * env->inv_max_steps);
-}
-
-void compute_observations(Pool* env) {
-    compute_single_observation(env, 0, env->observations + 0 * OBS_SIZE);
-    compute_single_observation(env, 1, env->observations + 1 * OBS_SIZE);
+    obs0[idx] = env->current_player == 0 ? 1.0f : 0.0f;
+    obs1[idx++] = env->current_player == 1 ? 1.0f : 0.0f;
+    obs0[idx] = p0_group == GROUP_SOLIDS ? 1.0f : 0.0f;
+    obs1[idx++] = p1_group == GROUP_SOLIDS ? 1.0f : 0.0f;
+    obs0[idx] = p0_group == GROUP_STRIPES ? 1.0f : 0.0f;
+    obs1[idx++] = p1_group == GROUP_STRIPES ? 1.0f : 0.0f;
+    obs0[idx] = p1_group == GROUP_SOLIDS ? 1.0f : 0.0f;
+    obs1[idx++] = p0_group == GROUP_SOLIDS ? 1.0f : 0.0f;
+    obs0[idx] = p1_group == GROUP_STRIPES ? 1.0f : 0.0f;
+    obs1[idx++] = p0_group == GROUP_STRIPES ? 1.0f : 0.0f;
+    obs0[idx] = (float)p0_remaining / 7.0f;
+    obs1[idx++] = (float)p1_remaining / 7.0f;
+    obs0[idx] = (float)p1_remaining / 7.0f;
+    obs1[idx++] = (float)p0_remaining / 7.0f;
+    obs0[idx] = in_hand;
+    obs1[idx++] = in_hand;
+    obs0[idx] = tick_frac;
+    obs1[idx++] = tick_frac;
 }
 
 static inline void add_episode_log(Pool* env) {
