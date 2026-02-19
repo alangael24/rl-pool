@@ -246,7 +246,23 @@ class PuffeRL:
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
 
             profile('eval_misc', epoch)
-            env_id = slice(env_id[0], env_id[-1] + 1)
+            sync_traj = bool(getattr(self.vecenv, 'sync_traj', True))
+            env_id = np.asarray(env_id, dtype=np.int64)
+            env_slice = None
+            if not sync_traj and config['use_rnn']:
+                raise pufferlib.APIUsageError(
+                    'RNN eval requires sync trajectory mode. '
+                    'Use --vec.sync-traj true.'
+                )
+            if sync_traj:
+                is_contiguous = len(env_id) < 2 or np.all(np.diff(env_id) == 1)
+                if is_contiguous:
+                    env_slice = slice(int(env_id[0]), int(env_id[-1]) + 1)
+                elif config['use_rnn']:
+                    raise pufferlib.APIUsageError(
+                        'RNN eval requires contiguous env_id batches. '
+                        'Use --vec.sync-traj true or --vec.zero-copy true.'
+                    )
 
             self.global_step += int(mask.sum())
 
@@ -263,13 +279,13 @@ class PuffeRL:
                 state = dict(
                     reward=r,
                     done=done_mask,
-                    env_id=env_id,
+                    env_id=env_slice if env_slice is not None else env_id,
                     mask=mask,
                 )
 
                 if config['use_rnn']:
-                    state['lstm_h'] = self.lstm_h[env_id.start]
-                    state['lstm_c'] = self.lstm_c[env_id.start]
+                    state['lstm_h'] = self.lstm_h[env_slice.start]
+                    state['lstm_c'] = self.lstm_c[env_slice.start]
 
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
@@ -278,33 +294,64 @@ class PuffeRL:
             profile('eval_copy', epoch)
             with torch.no_grad():
                 if config['use_rnn']:
-                    self.lstm_h[env_id.start] = state['lstm_h']
-                    self.lstm_c[env_id.start] = state['lstm_c']
+                    self.lstm_h[env_slice.start] = state['lstm_h']
+                    self.lstm_c[env_slice.start] = state['lstm_c']
 
-                # Fast path for fully vectorized envs
-                l = self.ep_lengths[env_id.start].item()
-                batch_rows = slice(self.ep_indices[env_id.start].item(), 1+self.ep_indices[env_id.stop - 1].item())
+                # Fast path for contiguous agent batches
+                if sync_traj and env_slice is not None:
+                    l = self.ep_lengths[env_slice.start].item()
+                    batch_rows = slice(self.ep_indices[env_slice.start].item(),
+                        1 + self.ep_indices[env_slice.stop - 1].item())
 
-                if config['cpu_offload']:
-                    self.observations[batch_rows, l] = o
+                    if config['cpu_offload']:
+                        self.observations[batch_rows, l] = o
+                    else:
+                        self.observations[batch_rows, l] = o_device
+
+                    self.actions[batch_rows, l] = action
+                    self.logprobs[batch_rows, l] = logprob
+                    self.rewards[batch_rows, l] = r
+                    self.terminals[batch_rows, l] = d.float()
+                    self.truncations[batch_rows, l] = t.float()
+                    self.values[batch_rows, l] = value.flatten()
+
+                    # Note: We are not yet handling masks in this version
+                    self.ep_lengths[env_slice] += 1
+                    if l+1 >= config['bptt_horizon']:
+                        num_full = env_slice.stop - env_slice.start
+                        self.ep_indices[env_slice] = self.free_idx + torch.arange(
+                            num_full, device=config['device']).int()
+                        self.ep_lengths[env_slice] = 0
+                        self.free_idx += num_full
+                        self.full_rows += num_full
                 else:
-                    self.observations[batch_rows, l] = o_device
+                    env_id_t = torch.as_tensor(env_id, device=device, dtype=torch.long)
+                    rows = self.ep_indices[env_id_t].long()
+                    cols = self.ep_lengths[env_id_t].long()
 
-                self.actions[batch_rows, l] = action
-                self.logprobs[batch_rows, l] = logprob
-                self.rewards[batch_rows, l] = r
-                self.terminals[batch_rows, l] = d.float()
-                self.truncations[batch_rows, l] = t.float()
-                self.values[batch_rows, l] = value.flatten()
+                    if config['cpu_offload']:
+                        self.observations[rows.cpu(), cols.cpu()] = o
+                    else:
+                        self.observations[rows, cols] = o_device
 
-                # Note: We are not yet handling masks in this version
-                self.ep_lengths[env_id] += 1
-                if l+1 >= config['bptt_horizon']:
-                    num_full = env_id.stop - env_id.start
-                    self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config['device']).int()
-                    self.ep_lengths[env_id] = 0
-                    self.free_idx += num_full
-                    self.full_rows += num_full
+                    self.actions[rows, cols] = action
+                    self.logprobs[rows, cols] = logprob
+                    self.rewards[rows, cols] = r
+                    self.terminals[rows, cols] = d.float()
+                    self.truncations[rows, cols] = t.float()
+                    self.values[rows, cols] = value.flatten()
+
+                    next_cols = cols + 1
+                    self.ep_lengths[env_id_t] = next_cols.to(self.ep_lengths.dtype)
+                    done = next_cols >= config['bptt_horizon']
+                    if done.any():
+                        done_envs = env_id_t[done]
+                        num_full = int(done_envs.numel())
+                        self.ep_indices[done_envs] = self.free_idx + torch.arange(
+                            num_full, device=device, dtype=self.ep_indices.dtype)
+                        self.ep_lengths[done_envs] = 0
+                        self.free_idx += num_full
+                        self.full_rows += num_full
 
                 action = action.cpu().numpy()
                 if isinstance(logits, torch.distributions.Normal):
