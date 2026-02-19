@@ -186,6 +186,34 @@ def entropy_probs(logits, probs):
     p_log_p = logits * probs
     return -p_log_p.sum(-1)
 
+def _sample_multidiscrete_logits(logits, action=None):
+    batch = logits[0].shape[0]
+    if action is not None:
+        action = action.view(batch, -1).long()
+        if action.shape[1] != len(logits):
+            raise ValueError('Invalid multidiscrete action shape')
+
+    actions = []
+    logprobs = []
+    entropies = []
+    for i, head_logits in enumerate(logits):
+        normalized = head_logits - head_logits.logsumexp(dim=-1, keepdim=True)
+        if action is None:
+            probs = logits_to_probs(head_logits)
+            probs = torch.nan_to_num(probs, 1e-8, 1e-8, 1e-8)
+            head_action = torch.multinomial(probs, 1, replacement=True).squeeze(-1).int()
+        else:
+            head_action = action[:, i]
+
+        actions.append(head_action)
+        logprobs.append(log_prob(normalized, head_action))
+        entropies.append(entropy(normalized))
+
+    action = torch.stack(actions, dim=1)
+    logprob = torch.stack(logprobs, dim=0).sum(dim=0)
+    logits_entropy = torch.stack(entropies, dim=0).sum(dim=0)
+    return action, logprob, logits_entropy
+
 def sample_logits(logits, action=None):
     is_discrete = isinstance(logits, torch.Tensor)
     if isinstance(logits, torch.distributions.Normal):
@@ -198,13 +226,18 @@ def sample_logits(logits, action=None):
         return action, log_probs, logits_entropy
     elif is_discrete:
         logits = logits.unsqueeze(0)
-    # TODO: Double check this
-    else: #multi-discrete
+    # Fast path for multidiscrete heads emitted as tuple/list of [B, A_i]
+    elif isinstance(logits, (tuple, list)):
+        if len(logits) > 0 and all(isinstance(l, torch.Tensor) and l.ndim == 2 for l in logits):
+            return _sample_multidiscrete_logits(logits, action=action)
+        # TODO: Double check this fallback path
         logits = torch.nn.utils.rnn.pad_sequence(
             [l.transpose(0,1) for l in logits], 
             batch_first=False, 
             padding_value=-torch.inf
         ).permute(1,2,0)
+    else:
+        raise ValueError(f'Unsupported logits type: {type(logits)}')
 
     # This can fail on nans etc
     normalized_logits = logits - logits.logsumexp(dim=-1, keepdim=True)
