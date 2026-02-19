@@ -1,3 +1,4 @@
+#define POOL_STATIC_ACTION_INT 1
 #define STATIC_BINDING
 #include "pool.h"
 
@@ -5,7 +6,7 @@
 #define NUM_ATNS 2
 #define ACT_SIZES {16, 5}
 #define OBS_TYPE FLOAT
-#define ACT_TYPE DOUBLE
+#define ACT_TYPE INT
 
 #define Env Pool
 #include "env_binding.h"

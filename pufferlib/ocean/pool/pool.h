@@ -5,7 +5,11 @@
 #include "raylib.h"
 
 #ifdef STATIC_BINDING
+#ifdef POOL_STATIC_ACTION_INT
+typedef int pool_action_t;
+#else
 typedef double pool_action_t;
+#endif
 typedef float pool_done_t;
 #else
 typedef int pool_action_t;

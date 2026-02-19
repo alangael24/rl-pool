@@ -48,6 +48,17 @@ static inline size_t obs_element_size(void) {
     }
 }
 
+static inline size_t act_element_size(void) {
+    switch (ACT_TYPE) {
+        case FLOAT: return sizeof(float);
+        case INT: return sizeof(int);
+        case UNSIGNED_CHAR: return sizeof(unsigned char);
+        case DOUBLE: return sizeof(double);
+        case CHAR: return sizeof(char);
+        default: return sizeof(double);
+    }
+}
+
 struct StaticThreading {
     atomic_int* buffer_states;
     atomic_int shutdown;
@@ -106,10 +117,12 @@ static void* static_omp_threadmanager(void* arg) {
             clock_gettime(CLOCK_MONOTONIC, &t0);
             net_callback(ctx, buf, t);
 
+            size_t act_offset = (size_t)agent_start * NUM_ATNS * act_element_size();
+            size_t act_bytes = (size_t)agents_per_buffer * NUM_ATNS * act_element_size();
             cudaMemcpyAsync(
-                &vec->actions[agent_start * NUM_ATNS],
-                &vec->gpu_actions[agent_start * NUM_ATNS],
-                agents_per_buffer * NUM_ATNS * sizeof(double),
+                (char*)vec->actions + act_offset,
+                (char*)vec->gpu_actions + act_offset,
+                act_bytes,
                 cudaMemcpyDeviceToHost, stream);
             cudaStreamSynchronize(stream);
             clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -226,18 +239,19 @@ StaticVec* create_static_vec(int total_agents, int num_buffers, Dict* vec_kwargs
     vec->size = num_envs;
 
     size_t obs_elem_size = obs_element_size();
+    size_t act_elem_size = act_element_size();
     cudaHostAlloc((void**)&vec->observations, total_agents * OBS_SIZE * obs_elem_size, cudaHostAllocPortable);
-    cudaHostAlloc((void**)&vec->actions, total_agents * NUM_ATNS * sizeof(double), cudaHostAllocPortable);
+    cudaHostAlloc((void**)&vec->actions, total_agents * NUM_ATNS * act_elem_size, cudaHostAllocPortable);
     cudaHostAlloc((void**)&vec->rewards, total_agents * sizeof(float), cudaHostAllocPortable);
     cudaHostAlloc((void**)&vec->terminals, total_agents * sizeof(float), cudaHostAllocPortable);
 
     cudaMalloc((void**)&vec->gpu_observations, total_agents * OBS_SIZE * obs_elem_size);
-    cudaMalloc((void**)&vec->gpu_actions, total_agents * NUM_ATNS * sizeof(double));
+    cudaMalloc((void**)&vec->gpu_actions, total_agents * NUM_ATNS * act_elem_size);
     cudaMalloc((void**)&vec->gpu_rewards, total_agents * sizeof(float));
     cudaMalloc((void**)&vec->gpu_terminals, total_agents * sizeof(float));
 
     cudaMemset(vec->gpu_observations, 0, total_agents * OBS_SIZE * obs_elem_size);
-    cudaMemset(vec->gpu_actions, 0, total_agents * NUM_ATNS * sizeof(double));
+    cudaMemset(vec->gpu_actions, 0, total_agents * NUM_ATNS * act_elem_size);
     cudaMemset(vec->gpu_rewards, 0, total_agents * sizeof(float));
     cudaMemset(vec->gpu_terminals, 0, total_agents * sizeof(float));
 
@@ -256,7 +270,7 @@ StaticVec* create_static_vec(int total_agents, int num_buffers, Dict* vec_kwargs
             Env* env = &envs[env_start + e];
             int slot = buf_start + buf_agent;
             env->observations = (void*)((char*)vec->observations + slot * OBS_SIZE * obs_elem_size);
-            env->actions = vec->actions + slot * NUM_ATNS;
+            env->actions = (void*)((char*)vec->actions + (size_t)slot * NUM_ATNS * act_elem_size);
             env->rewards = vec->rewards + slot;
             env->terminals = vec->terminals + slot;
             buf_agent += env->num_agents;
@@ -328,7 +342,7 @@ void static_vec_close(StaticVec* vec) {
 
     cudaDeviceSynchronize();
     size_t obs_bytes = vec->total_agents * OBS_SIZE * obs_element_size();
-    size_t act_bytes = vec->total_agents * NUM_ATNS * sizeof(double);
+    size_t act_bytes = vec->total_agents * NUM_ATNS * act_element_size();
     size_t rew_bytes = vec->total_agents * sizeof(float);
     size_t term_bytes = vec->total_agents * sizeof(float);
     cudaFree(vec->gpu_observations);
@@ -388,6 +402,7 @@ void static_vec_read_profile(StaticVec* vec, float out[NUM_EVAL_PROF]) {
 int get_obs_size(void) { return OBS_SIZE; }
 int get_obs_type(void) { return OBS_TYPE; }
 int get_num_atns(void) { return NUM_ATNS; }
+int get_act_type(void) { return ACT_TYPE; }
 static int _act_sizes[] = ACT_SIZES;
 int* get_act_sizes(void) { return _act_sizes; }
 

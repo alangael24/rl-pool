@@ -64,8 +64,9 @@ tuple<StaticVec*, Tensor> create_environments(int num_buffers, int total_agents,
     int num_atns = get_num_atns();
 
     auto obs_cuda_t = torch::dtype(to_torch_dtype(get_obs_type())).device(torch::kCUDA);
+    auto act_cuda_t = torch::dtype(to_torch_dtype(get_act_type())).device(torch::kCUDA);
     env.obs = torch::from_blob(vec->gpu_observations, {total_agents, obs_size}, obs_cuda_t);
-    env.actions = torch::from_blob(vec->gpu_actions, {total_agents, num_atns}, cuda_f64);
+    env.actions = torch::from_blob(vec->gpu_actions, {total_agents, num_atns}, act_cuda_t);
     env.rewards = torch::from_blob(vec->gpu_rewards, {total_agents}, cuda_f32);
     env.terminals = torch::from_blob(vec->gpu_terminals, {total_agents}, cuda_f32);
 
