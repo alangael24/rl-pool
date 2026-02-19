@@ -240,21 +240,29 @@ class PuffeRL:
                 self.lstm_h[k].zero_()
                 self.lstm_c[k].zero_()
 
+        eval_sync_traj = bool(getattr(self.vecenv, 'sync_traj', True))
+        if not eval_sync_traj and self.segments > self.total_agents:
+            raise pufferlib.APIUsageError(
+                'Async trajectory mode currently requires batch_size <= total_agents*bptt_horizon.'
+            )
+        active_envs = None
+        if not eval_sync_traj:
+            active_envs = torch.ones(self.total_agents, dtype=torch.bool, device=device)
+
         self.full_rows = 0
         while self.full_rows < self.segments:
             profile('env', epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
 
             profile('eval_misc', epoch)
-            sync_traj = bool(getattr(self.vecenv, 'sync_traj', True))
             env_id = np.asarray(env_id, dtype=np.int64)
             env_slice = None
-            if not sync_traj and config['use_rnn']:
+            if not eval_sync_traj and config['use_rnn']:
                 raise pufferlib.APIUsageError(
                     'RNN eval requires sync trajectory mode. '
                     'Use --vec.sync-traj true.'
                 )
-            if sync_traj:
+            if eval_sync_traj:
                 is_contiguous = len(env_id) < 2 or np.all(np.diff(env_id) == 1)
                 if is_contiguous:
                     env_slice = slice(int(env_id[0]), int(env_id[-1]) + 1)
@@ -298,7 +306,7 @@ class PuffeRL:
                     self.lstm_c[env_slice.start] = state['lstm_c']
 
                 # Fast path for contiguous agent batches
-                if sync_traj and env_slice is not None:
+                if eval_sync_traj and env_slice is not None:
                     l = self.ep_lengths[env_slice.start].item()
                     batch_rows = slice(self.ep_indices[env_slice.start].item(),
                         1 + self.ep_indices[env_slice.stop - 1].item())
@@ -326,32 +334,37 @@ class PuffeRL:
                         self.full_rows += num_full
                 else:
                     env_id_t = torch.as_tensor(env_id, device=device, dtype=torch.long)
-                    rows = self.ep_indices[env_id_t].long()
-                    cols = self.ep_lengths[env_id_t].long()
+                    keep = active_envs[env_id_t]
+                    if keep.any():
+                        keep_idx = torch.nonzero(keep, as_tuple=False).flatten()
+                        keep_envs = env_id_t[keep_idx]
+                        rows = self.ep_indices[keep_envs].long()
+                        cols = self.ep_lengths[keep_envs].long()
+                        values = value.flatten()
 
-                    if config['cpu_offload']:
-                        self.observations[rows.cpu(), cols.cpu()] = o
-                    else:
-                        self.observations[rows, cols] = o_device
+                        if config['cpu_offload']:
+                            self.observations[rows.cpu(), cols.cpu()] = o[keep_idx.cpu()]
+                        else:
+                            self.observations[rows, cols] = o_device[keep_idx]
 
-                    self.actions[rows, cols] = action
-                    self.logprobs[rows, cols] = logprob
-                    self.rewards[rows, cols] = r
-                    self.terminals[rows, cols] = d.float()
-                    self.truncations[rows, cols] = t.float()
-                    self.values[rows, cols] = value.flatten()
+                        self.actions[rows, cols] = action[keep_idx]
+                        self.logprobs[rows, cols] = logprob[keep_idx]
+                        self.rewards[rows, cols] = r[keep_idx]
+                        self.terminals[rows, cols] = d.float()[keep_idx]
+                        self.truncations[rows, cols] = t.float()[keep_idx]
+                        self.values[rows, cols] = values[keep_idx]
 
-                    next_cols = cols + 1
-                    self.ep_lengths[env_id_t] = next_cols.to(self.ep_lengths.dtype)
-                    done = next_cols >= config['bptt_horizon']
-                    if done.any():
-                        done_envs = env_id_t[done]
-                        num_full = int(done_envs.numel())
-                        self.ep_indices[done_envs] = self.free_idx + torch.arange(
-                            num_full, device=device, dtype=self.ep_indices.dtype)
-                        self.ep_lengths[done_envs] = 0
-                        self.free_idx += num_full
-                        self.full_rows += num_full
+                        next_cols = cols + 1
+                        done = next_cols >= config['bptt_horizon']
+                        if done.any():
+                            done_envs = keep_envs[done]
+                            active_envs[done_envs] = False
+                            self.ep_lengths[done_envs] = 0
+                            self.full_rows += int(done.sum().item())
+
+                        if (~done).any():
+                            ongoing_envs = keep_envs[~done]
+                            self.ep_lengths[ongoing_envs] = next_cols[~done].to(self.ep_lengths.dtype)
 
                 action = action.cpu().numpy()
                 if isinstance(logits, torch.distributions.Normal):
