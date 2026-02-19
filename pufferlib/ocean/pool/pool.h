@@ -88,6 +88,8 @@ struct Pool {
     float ball_vx[NUM_BALLS];
     float ball_vy[NUM_BALLS];
     unsigned char ball_alive[NUM_BALLS];
+    int remaining_solids;
+    int remaining_stripes;
 
     int player_group[NUM_PLAYERS];
     int current_player;
@@ -137,13 +139,9 @@ static inline void shuffle_ints(int* arr, int n) {
 
 static inline int count_remaining_group(Pool* env, int group) {
     if (group == GROUP_UNKNOWN) return 0;
-
-    int count = 0;
-    for (int i = 1; i < NUM_BALLS; i++) {
-        if (!env->ball_alive[i]) continue;
-        if (group_for_ball(i) == group) count++;
-    }
-    return count;
+    if (group == GROUP_SOLIDS) return env->remaining_solids;
+    if (group == GROUP_STRIPES) return env->remaining_stripes;
+    return 0;
 }
 
 static inline const char* group_name(int g) {
@@ -225,6 +223,9 @@ static inline void place_cue_ball_in_hand(Pool* env) {
 }
 
 static inline void rack_balls(Pool* env) {
+    env->remaining_solids = 7;
+    env->remaining_stripes = 7;
+
     for (int i = 0; i < NUM_BALLS; i++) {
         env->ball_alive[i] = 1;
         env->ball_vx[i] = 0.0f;
@@ -539,6 +540,12 @@ static inline bool simulate_physics_substep(Pool* env, unsigned char* potted, in
                 env->ball_alive[i] = 0;
                 env->ball_vx[i] = 0.0f;
                 env->ball_vy[i] = 0.0f;
+                int group = group_for_ball(i);
+                if (group == GROUP_SOLIDS && env->remaining_solids > 0) {
+                    env->remaining_solids -= 1;
+                } else if (group == GROUP_STRIPES && env->remaining_stripes > 0) {
+                    env->remaining_stripes -= 1;
+                }
                 potted[i] = 1;
                 if (i == CUE_BALL) {
                     *scratch = 1;
