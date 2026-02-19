@@ -4,6 +4,14 @@
 #include <stdbool.h>
 #include "raylib.h"
 
+#ifdef STATIC_BINDING
+typedef double pool_action_t;
+typedef float pool_done_t;
+#else
+typedef int pool_action_t;
+typedef unsigned char pool_done_t;
+#endif
+
 #define PI 3.14159265358979323846f
 #define NUM_SHOT_DIRS 16
 #define NUM_POWER_BINS 5
@@ -42,13 +50,14 @@ struct Client {
 typedef struct Pool Pool;
 struct Pool {
     float* observations;
-    int* actions;
+    pool_action_t* actions;
     float* rewards;
-    unsigned char* terminals;
-    unsigned char* truncations;
+    pool_done_t* terminals;
+    pool_done_t* truncations;
 
     Log log;
     Client* client;
+    int num_agents;
 
     float table_width;
     float table_height;
@@ -371,6 +380,7 @@ static inline void add_episode_log(Pool* env) {
 void init(Pool* env) {
     memset(&env->log, 0, sizeof(Log));
     env->client = NULL;
+    env->num_agents = NUM_PLAYERS;
     update_derived_constants(env);
 }
 
@@ -461,8 +471,8 @@ static inline void collide_two_balls(Pool* env, int ia, int ib, int* first_hit) 
 static inline bool maybe_take_shot(Pool* env, bool balls_are_stationary) {
     int shooter = env->current_player;
     int action_base = shooter * 2;
-    int direction_action = env->actions[action_base];
-    int power_action = env->actions[action_base + 1];
+    int direction_action = (int)env->actions[action_base];
+    int power_action = (int)env->actions[action_base + 1];
 
     if (!balls_are_stationary) {
         return false;
@@ -677,7 +687,9 @@ void c_step(Pool* env) {
     for (int p = 0; p < NUM_PLAYERS; p++) {
         env->rewards[p] = 0.0f;
         env->terminals[p] = 0;
-        env->truncations[p] = 0;
+        if (env->truncations != NULL) {
+            env->truncations[p] = 0;
+        }
     }
 
     env->tick += 1;
@@ -737,7 +749,7 @@ void c_step(Pool* env) {
     if (done) {
         env->terminals[0] = 1;
         env->terminals[1] = 1;
-        if (timeout) {
+        if (timeout && env->truncations != NULL) {
             env->truncations[0] = 1;
             env->truncations[1] = 1;
         }

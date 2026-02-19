@@ -11,6 +11,7 @@ import zipfile
 import tarfile
 import platform
 import shutil
+import pybind11
 
 from setuptools.command.build_ext import build_ext
 from torch.utils import cpp_extension
@@ -25,6 +26,11 @@ from torch.utils.cpp_extension import (
 # build cuda extension if torch can find CUDA or HIP/ROCM in the system
 # may require `uv pip install --no-build-isolation` or `python setup.py build_ext --inplace`
 BUID_CUDA_EXT = bool(CUDA_HOME or ROCM_HOME)
+
+# Use ccache if available for faster rebuilds
+if shutil.which('ccache'):
+    os.environ.setdefault('CC', 'ccache cc')
+    os.environ.setdefault('CXX', 'ccache c++')
 
 # Build with DEBUG=1 to enable debug symbols
 DEBUG = os.getenv("DEBUG", "0") == "1"
@@ -78,23 +84,29 @@ extra_compile_args = [
     '-DPLATFORM_DESKTOP',
 ]
 extra_link_args = [
-    '-fwrapv'
+    '-fwrapv',
+    '-fopenmp',
 ]
 cxx_args = [
     '-fdiagnostics-color=always',
+    '-std=c++17',
+    '-fopenmp',
 ]
-nvcc_args = []
+nvcc_args = [
+    '-Xcompiler=-D_GLIBCXX_USE_CXX11_ABI=1',
+    '-std=c++17',
+]
 
 if DEBUG:
     extra_compile_args += [
         '-O0',
         '-g',
-        '-fsanitize=address,undefined,bounds,pointer-overflow,leak',
-        '-fno-omit-frame-pointer',
+        #'-fsanitize=address,undefined,bounds,pointer-overflow,leak',
+        #'-fno-omit-frame-pointer',
     ]
     extra_link_args += [
         '-g',
-        '-fsanitize=address,undefined,bounds,pointer-overflow,leak',
+        #'-fsanitize=address,undefined,bounds,pointer-overflow,leak',
     ]
     cxx_args += [
         '-O0',
@@ -107,13 +119,17 @@ if DEBUG:
 else:
     extra_compile_args += [
         '-O2',
-        '-flto',
+        '-flto=auto',
+        '-fno-semantic-interposition',
+        '-fvisibility=hidden',
     ]
     extra_link_args += [
         '-O2',
     ]
     cxx_args += [
-        '-O3',
+        '-O2',
+        '-fno-semantic-interposition',
+        '-Wno-c++11-narrowing',
     ]
     nvcc_args += [
         '-O3',
@@ -123,7 +139,6 @@ system = platform.system()
 if system == 'Linux':
     extra_compile_args += [
         '-Wno-alloc-size-larger-than',
-        '-Wno-implicit-function-declaration',
         '-fmax-errors=3',
     ]
     extra_link_args += [
@@ -167,14 +182,15 @@ class BuildExt(build_ext):
         self.run_command('build_torch')
         self.run_command('build_c')
 
+extnames = ["pufferlib._C", "squared_torch._C"]
 class CBuildExt(build_ext):
     def run(self, *args, **kwargs):
-        self.extensions = [e for e in self.extensions if e.name != "pufferlib._C"]
+        self.extensions = [e for e in self.extensions if e.name not in extnames]
         super().run(*args, **kwargs)
 
 class TorchBuildExt(cpp_extension.BuildExtension):
     def run(self):
-        self.extensions = [e for e in self.extensions if e.name == "pufferlib._C"]
+        self.extensions = [e for e in self.extensions if e.name in extnames]
         super().run()
 
 INCLUDE = [f'{BOX2D_NAME}/include', f'{BOX2D_NAME}/src']
@@ -213,12 +229,136 @@ if not NO_OCEAN:
             c_ext.include_dirs.append('/usr/local/include')
             c_ext.extra_link_args.extend(['-L/usr/local/lib', '-llammps'])
 
+
+class ProfilerBuildExt(build_ext):
+    user_options = build_ext.user_options + [
+        ('no-torch', None, 'Build profiler without torch support'),
+        ('env=', None, 'Static env to link (e.g., breakout, drive)'),
+        ('precision=', None, 'Precision: float or bf16 (default: float)'),
+    ]
+
+    def initialize_options(self):
+        super().initialize_options()
+        self.no_torch = False
+        self.env = None
+        self.precision = 'float'
+
+    def finalize_options(self):
+        super().finalize_options()
+
+    def run(self):
+        import subprocess
+        import sysconfig
+        import torch.utils.cpp_extension as cpp_ext
+
+        src = 'profile_kernels.cu'
+        out = 'profile'
+
+        nvcc = cpp_ext._join_cuda_home('bin', 'nvcc')
+        arch = '-arch=sm_89'
+
+        cmd = [nvcc, '-O3', arch, '-I.', src, '-o', out]
+
+        if not self.no_torch:
+            out = 'profile_torch'
+            lib_paths = cpp_ext.library_paths()
+            nvtx_lib_dir = os.path.join(cpp_ext.CUDA_HOME, 'lib64')
+
+            precision_flag = '-DPRECISION_FLOAT' if self.precision == 'float' else ''
+            cmd = [nvcc, '-O3', arch, '-DUSE_TORCH',
+                   '-I.', '-Ipufferlib/extensions']
+            if precision_flag:
+                cmd.append(precision_flag)
+
+            # Optional static env for envspeed profiling
+            if self.env:
+                static_lib = f'pufferlib/extensions/libstatic_{self.env}.a'
+                if not os.path.exists(static_lib):
+                    raise RuntimeError(f'Static library not found: {static_lib}\n'
+                                       f'Build it first with: python setup.py build_{self.env}')
+                cmd += [f'-DENV_NAME={self.env}', '-DUSE_STATIC_ENV',
+                        f'-I./{RAYLIB_NAME}/include']
+
+            cmd += ['-I' + sysconfig.get_path('include')]
+            cmd += ['-I' + p for p in cpp_ext.include_paths()]
+            cmd += ['-L' + p for p in lib_paths]
+            cmd += ['-L' + nvtx_lib_dir]
+            cmd += ['-Xlinker', '-rpath,' + ':'.join(lib_paths)]
+            cmd += ['-Xlinker', '--no-as-needed']
+            cmd += ['-lc10', '-lc10_cuda', '-ltorch', '-ltorch_cpu', '-ltorch_cuda', '-lnvToolsExt', '-ldl', '-lnccl']
+            cmd += ['-Xlinker', '--unresolved-symbols=ignore-in-shared-libs']
+            if self.env:
+                static_lib = f'pufferlib/extensions/libstatic_{self.env}.a'
+                cmd += [static_lib, f'./{RAYLIB_NAME}/lib/libraylib.a', '-lGL']
+            cmd += ['-lomp5']
+            cmd += [src, '-o', out]
+
+        print(f'Building profiler: {" ".join(cmd)}')
+        subprocess.check_call(cmd)
+        print(f'Built: {out}')
+
 # Define cmdclass outside of setup to add dynamic commands
 cmdclass = {
     "build_ext": BuildExt,
     "build_torch": TorchBuildExt,
     "build_c": CBuildExt,
+    "build_profiler": ProfilerBuildExt,
 }
+
+# Static env builds: clang-compiled env + gcc/nvcc torch extension
+# Discover envs by listing folders in pufferlib/ocean
+OCEAN_DIR = 'pufferlib/ocean'
+STATIC_ENVS = [
+    name for name in os.listdir(OCEAN_DIR)
+    if os.path.isdir(os.path.join(OCEAN_DIR, name))
+    and not name.startswith('__')
+    and os.path.exists(f'pufferlib/ocean/{name}/binding.h')
+]
+
+def create_static_env_build_class(env_name):
+    """Create a build class that compiles env with clang and links with torch extension."""
+    class StaticEnvBuildExt(cpp_extension.BuildExtension):
+        def run(self):
+            import subprocess
+
+            # Step 1: Build static library with clang
+            # env_binding.c includes binding.h from the env's directory
+            env_binding_src = 'pufferlib/extensions/env_binding.c'
+            static_lib = f'pufferlib/extensions/libstatic_{env_name}.a'
+            static_obj = f'pufferlib/extensions/libstatic_{env_name}.o'
+
+            # -g?
+            clang_cmd = [
+                'clang', '-c', '-O2', '-DNDEBUG',
+                '-I.', '-Ipufferlib/extensions', f'-Ipufferlib/ocean/{env_name}',
+                f'-I./{RAYLIB_NAME}/include', '-I/usr/local/cuda/include',
+                '-DPLATFORM_DESKTOP',
+                '-fno-semantic-interposition', '-fvisibility=hidden',
+                '-fPIC', '-fopenmp',
+                env_binding_src, '-o', static_obj
+            ]
+            print(f'Building static env: {" ".join(clang_cmd)}')
+            subprocess.check_call(clang_cmd)
+
+            ar_cmd = ['ar', 'rcs', static_lib, static_obj]
+            print(f'Creating static library: {" ".join(ar_cmd)}')
+            subprocess.check_call(ar_cmd)
+
+            # Step 2: Build torch extension linked against this env's static lib
+            # Filter to only the pufferlib._C extension
+            self.extensions = [e for e in self.extensions if e.name == 'pufferlib._C']
+
+            # Update extra_objects to use this env's static lib
+            for ext in self.extensions:
+                ext.extra_objects = [RAYLIB_A, static_lib]
+
+            super().run()
+
+    return StaticEnvBuildExt
+
+# Add build_<env> for static-linked envs
+for env_name in STATIC_ENVS:
+    cmdclass[f"build_{env_name}"] = create_static_env_build_class(env_name)
 
 if not NO_OCEAN:
     def create_env_build_class(full_name):
@@ -228,32 +368,45 @@ if not NO_OCEAN:
                 super().run()
         return EnvBuildExt
 
-    # Add a build_<env> command for each env
+    # Add a build_<env>_so command for each env (dynamic .so build)
     for c_ext in c_extensions:
         env_name = c_ext.name.split('.')[-2]
-        cmdclass[f"build_{env_name}"] = create_env_build_class(c_ext.name)
+        cmdclass[f"build_{env_name}_so"] = create_env_build_class(c_ext.name)
 
 
 # Check if CUDA compiler is available. You need cuda dev, not just runtime.
+import torch
+cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH') or torch.utils.cpp_extension.CUDA_HOME or '/usr/local/cuda'
+nvtx_lib_dir = os.path.join(cuda_home, 'lib64')  # Common on Linux; fall back to 'lib' if needed
+nvtx_lib = 'nvToolsExt'
 torch_extensions = []
 if not NO_TRAIN:
     torch_sources = [
-        "pufferlib/extensions/pufferlib.cpp",
+        "pufferlib/extensions/bindings.cpp",
     ]
     if BUID_CUDA_EXT:
         extension = CUDAExtension
-        torch_sources.append("pufferlib/extensions/cuda/pufferlib.cu")
+        torch_sources.append("pufferlib/extensions/cuda/squared_torch.cu")
+        torch_sources.append("pufferlib/extensions/cuda/modules.cu")
     else:
         extension = CppExtension
 
+    import torch
+    # Note: Use build_<envname> (e.g. build_breakout, build_drive) to build with static env linking
+    # build_torch alone won't link any env - it's for the training code only
     torch_extensions = [
        extension(
             "pufferlib._C",
             torch_sources,
+            include_dirs=[pybind11.get_include(), torch.utils.cpp_extension.include_paths()[0]],
             extra_compile_args = {
-                "cxx": cxx_args,
+                "cxx": extra_compile_args + cxx_args,
                 "nvcc": nvcc_args,
-            }
+            },
+            extra_link_args=extra_link_args,
+            extra_objects=[RAYLIB_A],
+            libraries=[nvtx_lib, 'omp5', 'nccl', 'nvidia-ml'],
+            library_dirs=[nvtx_lib_dir],
         ),
     ]
 
@@ -281,7 +434,7 @@ install_requires = [
 
 if not NO_TRAIN:
     install_requires += [
-        'torch',
+        'torch>=2.9',
         'psutil',
         'nvidia-ml-py',
         'rich',

@@ -788,6 +788,10 @@ def fmt_perf(name, color, delta_ref, prof, b2, c2):
     percent = 0 if delta_ref == 0 else int(100*prof['buffer']/delta_ref - 1e-5)
     return f'{color}{name}', duration(prof['elapsed'], b2, c2), f'{b2}{percent:2d}{c2}%'
 
+def fmt_perf2(name, color, delta_ref, elapsed, b2, c2):
+    percent = 0 if delta_ref == 0 else int(100*elapsed/delta_ref - 1e-5)
+    return f'{color}{name}', duration(elapsed, b2, c2), f'{b2}{percent:2d}{c2}%'
+
 def dist_sum(value, device):
     if not torch.distributed.is_initialized():
         return value
@@ -904,6 +908,269 @@ def downsample(data_list, num_points):
 
     return downsampled.tolist() + [last]
 
+def _coerce_cpp_threads(train_cfg, vec_cfg):
+    threads = train_cfg.get('cpp_num_threads', vec_cfg.get('num_workers', 'auto'))
+    if isinstance(threads, str):
+        if threads == 'auto':
+            cores = psutil.cpu_count(logical=False) or psutil.cpu_count() or 8
+            return max(1, int(cores))
+        threads = int(threads)
+    return max(1, int(threads))
+
+def _infer_agents_per_env(env_name, args):
+    short_name = env_name.replace('puffer_', '')
+    if short_name == 'pool':
+        num_tables = int(args.get('env', {}).get('num_envs', 1))
+        return max(1, num_tables * 2)
+
+    package = args['package']
+    module_name = 'pufferlib.ocean' if package == 'ocean' else f'pufferlib.environments.{package}'
+    env_module = importlib.import_module(module_name)
+    make_env = env_module.env_creator(env_name)
+
+    env_kwargs = dict(args['env'])
+
+    try:
+        probe = make_env(**env_kwargs)
+    except TypeError:
+        try:
+            probe = make_env()
+        except Exception:
+            fallback = int(args.get('env', {}).get('num_agents', 1))
+            return max(1, fallback)
+    except Exception:
+        fallback = int(args.get('env', {}).get('num_agents', 1))
+        return max(1, fallback)
+
+    try:
+        return int(getattr(probe, 'num_agents', 1))
+    finally:
+        close_fn = getattr(probe, 'close', None)
+        if callable(close_fn):
+            close_fn()
+
+def _map_cpp_configs(env_name, args):
+    train = args['train']
+    vec = args['vec']
+    env_cfg = dict(args['env'])
+    policy = dict(args.get('policy', {}))
+
+    agents_per_env = _infer_agents_per_env(env_name, args)
+    vec_num_envs = int(vec.get('num_envs', 1))
+    total_agents = max(1, vec_num_envs * agents_per_env)
+
+    raw_num_buffers = train.get('cpp_num_buffers', 'auto')
+    if isinstance(raw_num_buffers, str) and raw_num_buffers == 'auto':
+        num_buffers = vec_num_envs
+    else:
+        num_buffers = int(raw_num_buffers)
+    num_buffers = max(1, min(num_buffers, total_agents))
+    while total_agents % num_buffers != 0 and num_buffers > 1:
+        num_buffers -= 1
+
+    num_threads = _coerce_cpp_threads(train, vec)
+
+    cpp_train = {
+        'env': env_name,
+        'env_name': env_name,
+        'data_dir': train['data_dir'],
+        'checkpoint_interval': int(train['checkpoint_interval']),
+        'total_timesteps': int(train['total_timesteps']),
+        'horizon': int(train.get('bptt_horizon', 64)),
+        'learning_rate': float(train['learning_rate']),
+        'min_lr_ratio': float(train.get('min_lr_ratio', 0.0)),
+        'anneal_lr': 1 if train.get('anneal_lr', True) else 0,
+        'beta1': float(train.get('adam_beta1', train.get('beta1', 0.95))),
+        'beta2': float(train.get('adam_beta2', train.get('beta2', 0.999))),
+        'eps': float(train.get('adam_eps', train.get('eps', 1e-12))),
+        'minibatch_size': int(train['minibatch_size']),
+        'replay_ratio': float(train.get('update_epochs', train.get('replay_ratio', 1.0))),
+        'max_grad_norm': float(train['max_grad_norm']),
+        'clip_coef': float(train['clip_coef']),
+        'vf_clip_coef': float(train['vf_clip_coef']),
+        'vf_coef': float(train['vf_coef']),
+        'ent_coef': float(train['ent_coef']),
+        'gamma': float(train['gamma']),
+        'gae_lambda': float(train['gae_lambda']),
+        'vtrace_rho_clip': float(train['vtrace_rho_clip']),
+        'vtrace_c_clip': float(train['vtrace_c_clip']),
+        'prio_alpha': float(train['prio_alpha']),
+        'prio_beta0': float(train['prio_beta0']),
+        'use_rnn': 1 if train.get('use_rnn', False) else 0,
+        'cudagraphs': int(train.get('cudagraphs', -1)),
+        'kernels': 1 if train.get('kernels', True) else 0,
+        'profile': 1 if train.get('profile', False) else 0,
+        'rank': 0,
+        'world_size': 1,
+        'nccl_id_path': '/tmp/puffer_nccl_id',
+    }
+    vec_cfg = {
+        'total_agents': int(total_agents),
+        'num_buffers': int(num_buffers),
+        'num_threads': int(num_threads),
+    }
+    policy_cfg = {
+        'hidden_size': int(policy.get('hidden_size', 128)),
+        'num_layers': int(policy.get('num_layers', 1)),
+    }
+    return cpp_train, vec_cfg, env_cfg, policy_cfg
+
+class CppPuffeRL:
+    def __init__(self, config, vec_config, env_config, policy_config, logger=None):
+        if not hasattr(_C, 'create_pufferl'):
+            raise ImportError(
+                'C++ runtime symbols are missing in pufferlib._C. '
+                'Build with: python setup.py build_pool --inplace'
+            )
+
+        self.config = config
+        self.logger = logger or NoLogger(config)
+        self.pufferl_cpp = _C.create_pufferl(config, vec_config, env_config, policy_config)
+        self.policy_fp32 = self.pufferl_cpp.policy_fp32
+
+        self.global_step = 0
+        self.epoch = 0
+        self.last_log_step = 0
+        self.last_log_time = time.time()
+        self.start_time = time.time()
+        self.batch_size = int(config['horizon'] * vec_config['total_agents'])
+
+        self.stats = {}
+        self.losses = {}
+        self.profile = {}
+        self.utilization = {}
+        self.msg = ''
+        self.model_size = sum(p.numel() for p in self.policy_fp32.parameters() if p.requires_grad)
+
+    @property
+    def uptime(self):
+        return time.time() - self.start_time
+
+    @property
+    def sps(self):
+        if self.global_step == self.last_log_step:
+            return 0
+        return (self.global_step - self.last_log_step) / max(1e-9, time.time() - self.last_log_time)
+
+    def evaluate(self):
+        _C.rollouts(self.pufferl_cpp)
+        self.global_step += self.batch_size
+
+    def write_logs(self, env_logs):
+        agent_steps = int(self.global_step)
+        logs = {
+            'SPS': int(self.sps),
+            'agent_steps': agent_steps,
+            'uptime': self.uptime,
+            'epoch': int(self.epoch),
+            **{f'environment/{k}': v for k, v in env_logs.items()},
+            **{f'losses/{k}': v for k, v in self.losses.items()},
+            **{f'performance/{k}': v for k, v in self.profile.items()},
+        }
+        self.logger.log(logs, agent_steps)
+        return logs
+
+    def save_checkpoint(self):
+        run_id = self.logger.run_id
+        path = os.path.join(self.config['data_dir'], f'{self.config["env"]}_{run_id}')
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        model_name = f'model_{self.config["env"]}_{self.epoch:06d}.pt'
+        model_path = os.path.join(path, model_name)
+        if not os.path.exists(model_path):
+            torch.save(dict(self.policy_fp32.named_parameters()), model_path)
+
+        state = {
+            'global_step': self.global_step,
+            'agent_step': self.global_step,
+            'update': self.epoch,
+            'model_name': model_name,
+            'run_id': run_id,
+        }
+        state_path = os.path.join(path, 'trainer_state.pt')
+        torch.save(state, state_path + '.tmp')
+        os.replace(state_path + '.tmp', state_path)
+        return model_path
+
+    def print_dashboard(self):
+        score = self.stats.get('score', 0.0)
+        perf = self.stats.get('perf', 0.0)
+        print(
+            f'[CPP] step={self.global_step} epoch={self.epoch} '
+            f'sps={self.sps/1e3:.1f}K score={score:.3f} perf={perf:.3f}'
+        )
+
+    def train(self):
+        _C.train(self.pufferl_cpp)
+        self.epoch += 1
+
+        logs = None
+        done_training = self.global_step >= self.config['total_timesteps']
+        if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.6:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+            self.stats = _C.log_environments(self.pufferl_cpp)
+            self.losses = _C.log_losses(self.pufferl_cpp)
+            self.profile = _C.log_profile(self.pufferl_cpp)
+            self.utilization = _C.log_utilization(self.pufferl_cpp)
+
+            logs = self.write_logs(self.stats)
+            self.print_dashboard()
+            self.last_log_time = time.time()
+            self.last_log_step = self.global_step
+
+        if self.epoch % self.config['checkpoint_interval'] == 0 or done_training:
+            self.save_checkpoint()
+
+        return logs
+
+    def close(self):
+        model_path = self.save_checkpoint()
+        _C.close(self.pufferl_cpp)
+        self.pufferl_cpp = None
+        return model_path
+
+def train_cpp(env_name, args=None, logger=None, early_stop_fn=None):
+    args = args or load_config(env_name)
+    cpp_train, vec_cfg, env_cfg, policy_cfg = _map_cpp_configs(env_name, args)
+
+    if args['neptune']:
+        logger = NeptuneLogger(args)
+    elif args['wandb']:
+        logger = WandbLogger(args)
+    else:
+        logger = logger or NoLogger(args)
+
+    pufferl = CppPuffeRL(cpp_train, vec_cfg, env_cfg, policy_cfg, logger=logger)
+    logging_threshold = min(0.20*cpp_train['total_timesteps'], 100_000_000)
+    all_logs = []
+
+    while pufferl.global_step < cpp_train['total_timesteps']:
+        pufferl.evaluate()
+        logs = pufferl.train()
+        if logs is None:
+            continue
+
+        should_stop_early = False
+        if early_stop_fn is not None:
+            should_stop_early = early_stop_fn(logs)
+            if 'early_stop_threshold' in logs:
+                pufferl.logger.log({'environment/early_stop_threshold': logs['early_stop_threshold']}, logs['agent_steps'])
+
+        if pufferl.global_step > logging_threshold:
+            all_logs.append(logs)
+
+        if should_stop_early:
+            model_path = pufferl.close()
+            pufferl.logger.close(model_path, early_stop=True)
+            return all_logs
+
+    model_path = pufferl.close()
+    pufferl.logger.close(model_path, early_stop=False)
+    return all_logs
+
 class NoLogger:
     def __init__(self, args):
         self.run_id = str(int(100*time.time()))
@@ -992,6 +1259,8 @@ class WandbLogger:
 
 def train(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop_fn=None):
     args = args or load_config(env_name)
+    if str(args['train'].get('runtime', 'python')).lower() == 'cpp':
+        return train_cpp(env_name, args=args, logger=logger, early_stop_fn=early_stop_fn)
 
     # Assume TorchRun DDP is used if LOCAL_RANK is set
     if 'LOCAL_RANK' in os.environ:
