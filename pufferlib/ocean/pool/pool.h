@@ -439,13 +439,13 @@ static inline void collide_two_balls(Pool* env, int ia, int ib, int* first_hit) 
     env->ball_y[ib] += correction * ny;
 }
 
-static inline bool maybe_take_shot(Pool* env) {
+static inline bool maybe_take_shot(Pool* env, bool balls_are_stationary) {
     int shooter = env->current_player;
     int action_base = shooter * 2;
     int direction_action = env->actions[action_base];
     int power_action = env->actions[action_base + 1];
 
-    if (!balls_stationary(env)) {
+    if (!balls_are_stationary) {
         return false;
     }
 
@@ -468,24 +468,36 @@ static inline bool maybe_take_shot(Pool* env) {
     return true;
 }
 
-static inline void simulate_physics_substep(Pool* env, unsigned char* potted, int* scratch, int* first_hit) {
+static inline bool simulate_physics_substep(Pool* env, unsigned char* potted, int* scratch, int* first_hit) {
+    int alive_idx[NUM_BALLS];
+    int alive_count = 0;
+
     for (int i = 0; i < NUM_BALLS; i++) {
         if (!env->ball_alive[i]) continue;
+        alive_idx[alive_count++] = i;
         env->ball_x[i] += env->ball_vx[i];
         env->ball_y[i] += env->ball_vy[i];
     }
 
-    for (int i = 0; i < NUM_BALLS; i++) {
-        resolve_wall(env, i);
+    for (int k = 0; k < alive_count; k++) {
+        resolve_wall(env, alive_idx[k]);
     }
 
-    for (int i = 0; i < NUM_BALLS; i++) {
-        for (int j = i + 1; j < NUM_BALLS; j++) {
-            collide_two_balls(env, i, j, first_hit);
+    // Skip collision checks where both balls are already stationary.
+    for (int a = 0; a < alive_count; a++) {
+        int ia = alive_idx[a];
+        for (int b = a + 1; b < alive_count; b++) {
+            int ib = alive_idx[b];
+            if (env->ball_vx[ia] == 0.0f && env->ball_vy[ia] == 0.0f &&
+                env->ball_vx[ib] == 0.0f && env->ball_vy[ib] == 0.0f) {
+                continue;
+            }
+            collide_two_balls(env, ia, ib, first_hit);
         }
     }
 
-    for (int i = 0; i < NUM_BALLS; i++) {
+    for (int k = 0; k < alive_count; k++) {
+        int i = alive_idx[k];
         if (!env->ball_alive[i]) continue;
 
         env->ball_vx[i] *= env->friction;
@@ -495,7 +507,9 @@ static inline void simulate_physics_substep(Pool* env, unsigned char* potted, in
         if (fabsf(env->ball_vy[i]) < STATIONARY_EPS) env->ball_vy[i] = 0.0f;
     }
 
-    for (int i = 0; i < NUM_BALLS; i++) {
+    bool moving = false;
+    for (int k = 0; k < alive_count; k++) {
+        int i = alive_idx[k];
         if (!env->ball_alive[i]) continue;
 
         for (int p = 0; p < NUM_POCKETS; p++) {
@@ -510,7 +524,13 @@ static inline void simulate_physics_substep(Pool* env, unsigned char* potted, in
                 break;
             }
         }
+
+        if (env->ball_alive[i] && (env->ball_vx[i] != 0.0f || env->ball_vy[i] != 0.0f)) {
+            moving = true;
+        }
     }
+
+    return moving;
 }
 
 static inline void evaluate_shot(Pool* env, int shooter, unsigned char* potted, int scratch, int first_hit, bool* done) {
@@ -616,11 +636,12 @@ void c_step(Pool* env) {
     env->tick += 1;
     int shooter = env->current_player;
 
-    bool shot_fired = maybe_take_shot(env);
+    bool stationary = balls_stationary(env);
+    bool shot_fired = maybe_take_shot(env, stationary);
     bool done = false;
     bool timeout = false;
 
-    if (shot_fired || !balls_stationary(env)) {
+    if (shot_fired || !stationary) {
         unsigned char potted[NUM_BALLS];
         memset(potted, 0, sizeof(potted));
         int scratch = 0;
@@ -629,11 +650,12 @@ void c_step(Pool* env) {
         int max_substeps = env->fast_forward ? env->max_physics_steps : 1;
         if (max_substeps < 1) max_substeps = 1;
 
+        bool moving = true;
         for (int s = 0; s < max_substeps; s++) {
-            simulate_physics_substep(env, potted, &scratch, &first_hit);
+            moving = simulate_physics_substep(env, potted, &scratch, &first_hit);
             env->rewards[shooter] += env->reward_step;
 
-            if (env->fast_forward && balls_stationary(env)) {
+            if (env->fast_forward && !moving) {
                 break;
             }
         }
