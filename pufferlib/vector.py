@@ -5,6 +5,7 @@ from pdb import set_trace as T
 import numpy as np
 import time
 import psutil
+from collections import deque
 
 from pufferlib.emulation import GymnasiumPufferEnv, PettingZooPufferEnv
 from pufferlib import PufferEnv, set_buffers
@@ -350,60 +351,95 @@ class Multiprocessing:
         self.zero_copy = zero_copy
         self.sync_traj = sync_traj
 
-        self.ready_workers = []
-        self.waiting_workers = []
+        self.ready_mask = np.zeros(self.num_workers, dtype=bool)
+        self.ready_count = 0
+        self.ready_queue = deque()
+        self.waiting_workers = deque()
+        self._ready_blocks = None
+        if self.zero_copy and self.workers_per_batch > 1 and self.workers_per_batch < self.num_workers:
+            self._ready_blocks = np.zeros(self.num_workers // self.workers_per_batch, dtype=bool)
+
+    def _mark_ready(self, worker):
+        if not self.ready_mask[worker]:
+            self.ready_mask[worker] = True
+            self.ready_count += 1
+            self.ready_queue.append(worker)
+
+    def _clear_ready(self, worker):
+        if self.ready_mask[worker]:
+            self.ready_mask[worker] = False
+            self.ready_count -= 1
+
+    def _pop_ready_worker(self):
+        while self.ready_queue:
+            worker = self.ready_queue.popleft()
+            if self.ready_mask[worker]:
+                self.ready_mask[worker] = False
+                self.ready_count -= 1
+                return worker
+        return None
 
     def recv(self):
         recv_precheck(self)
         while True:
             # Bandaid patch for new experience buffer desync
             if self.sync_traj:
-                worker = self.waiting_workers[0]
-                sem = self.buf['semaphores'][worker]
-                if sem >= MAIN:
-                    self.waiting_workers.pop(0)
-                    self.ready_workers.append(worker)
+                if self.waiting_workers:
+                    worker = self.waiting_workers[0]
+                    sem = self.buf['semaphores'][worker]
+                    if sem >= MAIN:
+                        self.waiting_workers.popleft()
+                        self._mark_ready(worker)
+                else:
+                    worker = -1
+                    sem = MAIN
             else:
-                worker = self.waiting_workers.pop(0)
+                worker = self.waiting_workers.popleft()
                 sem = self.buf['semaphores'][worker]
                 if sem >= MAIN:
-                    self.ready_workers.append(worker)
+                    self._mark_ready(worker)
                 else:
                     self.waiting_workers.append(worker)
 
-            if sem == INFO:
+            if sem == INFO and worker >= 0:
                 self.infos[worker] = self.recv_pipes[worker].recv()
 
-            if not self.ready_workers:
+            if self.ready_count == 0:
                 continue
 
             if self.workers_per_batch == 1:
                 # Fastest path. Zero-copy optimized for batch size 1
-                w_slice = self.ready_workers[0]
-                s_range = [w_slice]
+                w_slice = self._pop_ready_worker()
+                if w_slice is None:
+                    continue
+                s_range = (w_slice,)
                 self.waiting_workers.append(w_slice)
-                self.ready_workers.pop(0)
                 break
             elif self.workers_per_batch == self.num_workers:
                 # Slowest path. Zero-copy synchornized for all workers
-                if len(self.ready_workers) < self.num_workers:
+                if self.ready_count < self.num_workers:
                     continue
 
                 w_slice = slice(0, self.num_workers)
                 s_range = range(0, self.num_workers)
                 self.waiting_workers.extend(s_range)
-                self.ready_workers = []
+                self.ready_mask[:] = False
+                self.ready_count = 0
+                self.ready_queue.clear()
                 break
             elif self.zero_copy:
                 # Zero-copy for batch size > 1. Has to wait for
                 # a contiguous block of workers and adds a few
                 # microseconds of extra index processing time
-                completed = np.zeros(self.num_workers, dtype=bool)
-                completed[self.ready_workers] = True
-                buffers = completed.reshape(
-                    -1, self.workers_per_batch).all(axis=1)
-                start = buffers.argmax()
-                if not buffers[start]:
+                if self.ready_count < self.workers_per_batch:
+                    continue
+                np.all(
+                    self.ready_mask.reshape(-1, self.workers_per_batch),
+                    axis=1,
+                    out=self._ready_blocks,
+                )
+                start = int(self._ready_blocks.argmax())
+                if not self._ready_blocks[start]:
                     continue
 
                 start *= self.workers_per_batch
@@ -411,17 +447,27 @@ class Multiprocessing:
                 w_slice = slice(start, end)
                 s_range = range(start, end)
                 self.waiting_workers.extend(s_range)
-                self.ready_workers = [e for e in self.ready_workers
-                    if e not in s_range]
+                for worker in s_range:
+                    self._clear_ready(worker)
                 break
-            elif len(self.ready_workers) >= self.workers_per_batch:
+            elif self.ready_count >= self.workers_per_batch:
                 # Full async path for batch size > 1. Alawys copies
                 # data because of non-contiguous worker indices
                 # Can be faster for envs with small observations
-                w_slice = self.ready_workers[:self.workers_per_batch]
-                s_range = w_slice
+                w_slice = []
+                while len(w_slice) < self.workers_per_batch:
+                    worker = self._pop_ready_worker()
+                    if worker is None:
+                        break
+                    w_slice.append(worker)
+
+                if len(w_slice) != self.workers_per_batch:
+                    for worker in w_slice:
+                        self._mark_ready(worker)
+                    continue
+
+                s_range = tuple(w_slice)
                 self.waiting_workers.extend(s_range)
-                self.ready_workers = self.ready_workers[self.workers_per_batch:]
                 break
 
         self.w_slice = w_slice
@@ -455,10 +501,10 @@ class Multiprocessing:
     def async_reset(self, seed=0):
         # Flush any waiting workers
         while self.waiting_workers:
-            worker = self.waiting_workers.pop(0)
+            worker = self.waiting_workers.popleft()
             sem = self.buf['semaphores'][worker]
             if sem >= MAIN:
-                self.ready_workers.append(worker)
+                self._mark_ready(worker)
                 if sem == INFO:
                     self.recv_pipes[worker].recv()
             else:
@@ -468,9 +514,10 @@ class Multiprocessing:
         self.prev_env_id = []
         self.flag = RECV
 
-        self.ready_workers = []
-        self.ready_next_workers = [] # Used to evenly sample workers
-        self.waiting_workers = list(range(self.num_workers))
+        self.ready_mask[:] = False
+        self.ready_count = 0
+        self.ready_queue.clear()
+        self.waiting_workers = deque(range(self.num_workers))
         self.infos = [[] for _ in range(self.num_workers)]
 
         self.buf['semaphores'][:] = RESET
