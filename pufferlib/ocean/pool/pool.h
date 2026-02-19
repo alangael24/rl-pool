@@ -470,34 +470,56 @@ static inline bool maybe_take_shot(Pool* env, bool balls_are_stationary) {
 
 static inline bool simulate_physics_substep(Pool* env, unsigned char* potted, int* scratch, int* first_hit) {
     int alive_idx[NUM_BALLS];
+    int moving_idx[NUM_BALLS];
+    signed char moving_order[NUM_BALLS];
+    unsigned char moving_mask[NUM_BALLS] = {0};
     int alive_count = 0;
+    int moving_count = 0;
 
     for (int i = 0; i < NUM_BALLS; i++) {
+        moving_order[i] = -1;
         if (!env->ball_alive[i]) continue;
         alive_idx[alive_count++] = i;
-        env->ball_x[i] += env->ball_vx[i];
-        env->ball_y[i] += env->ball_vy[i];
-    }
-
-    for (int k = 0; k < alive_count; k++) {
-        resolve_wall(env, alive_idx[k]);
-    }
-
-    // Skip collision checks where both balls are already stationary.
-    for (int a = 0; a < alive_count; a++) {
-        int ia = alive_idx[a];
-        for (int b = a + 1; b < alive_count; b++) {
-            int ib = alive_idx[b];
-            if (env->ball_vx[ia] == 0.0f && env->ball_vy[ia] == 0.0f &&
-                env->ball_vx[ib] == 0.0f && env->ball_vy[ib] == 0.0f) {
-                continue;
-            }
-            collide_two_balls(env, ia, ib, first_hit);
+        if (env->ball_vx[i] != 0.0f || env->ball_vy[i] != 0.0f) {
+            moving_order[i] = (signed char)moving_count;
+            moving_mask[i] = 1;
+            moving_idx[moving_count++] = i;
+            env->ball_x[i] += env->ball_vx[i];
+            env->ball_y[i] += env->ball_vy[i];
         }
     }
 
-    for (int k = 0; k < alive_count; k++) {
-        int i = alive_idx[k];
+    for (int k = 0; k < moving_count; k++) {
+        resolve_wall(env, moving_idx[k]);
+    }
+
+    // Only evaluate pairs touched by currently-moving balls.
+    // If a stationary ball starts moving due to collision, enqueue it once.
+    for (int m = 0; m < moving_count; m++) {
+        int ia = moving_idx[m];
+        int ia_order = moving_order[ia];
+        for (int b = 0; b < alive_count; b++) {
+            int ib = alive_idx[b];
+            if (ib == ia) {
+                continue;
+            }
+
+            if (moving_mask[ib] && moving_order[ib] < ia_order) {
+                continue;
+            }
+
+            collide_two_balls(env, ia, ib, first_hit);
+
+            if (!moving_mask[ib] && (env->ball_vx[ib] != 0.0f || env->ball_vy[ib] != 0.0f)) {
+                moving_order[ib] = (signed char)moving_count;
+                moving_mask[ib] = 1;
+                moving_idx[moving_count++] = ib;
+            }
+        }
+    }
+
+    for (int k = 0; k < moving_count; k++) {
+        int i = moving_idx[k];
         if (!env->ball_alive[i]) continue;
 
         env->ball_vx[i] *= env->friction;
